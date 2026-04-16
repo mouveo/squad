@@ -237,3 +237,92 @@ class TestHistory:
         _run(runner, db_path, "start", str(project_dir), "my idea")
         result = _run(runner, db_path, "history")
         assert "draft" in result.output
+
+
+# ── squad answer / squad resume (LOT 5) ────────────────────────────────────────
+
+
+from squad.db import create_question as _create_question  # noqa: E402
+from squad.db import list_pending_questions  # noqa: E402
+
+
+class TestAnswerCommand:
+    def _prepare_session(self, runner, db_path, project_dir):
+        _run(runner, db_path, "start", str(project_dir), "Build CRM")
+        from squad.db import list_active_sessions
+
+        return list_active_sessions(db_path=db_path)[0]
+
+    def test_records_answer_and_syncs_pending(self, runner, db_path, project_dir):
+        session = self._prepare_session(runner, db_path, project_dir)
+        q = _create_question(session.id, "pm", "cadrage", "What?", db_path=db_path)
+
+        with patch("squad.cli.get_global_db_path", return_value=db_path):
+            result = runner.invoke(
+                cli, ["answer", session.id, q.id, "SMBs"], catch_exceptions=False
+            )
+        assert result.exit_code == 0
+        pending = list_pending_questions(session.id, db_path=db_path)
+        assert pending == []
+        pending_json = Path(session.workspace_path) / "questions" / "pending.json"
+        assert pending_json.read_text().strip() == "[]"
+
+    def test_unknown_session_errors(self, runner, db_path):
+        with patch("squad.cli.get_global_db_path", return_value=db_path):
+            result = runner.invoke(cli, ["answer", "ghost", "q1", "answer"], catch_exceptions=False)
+        assert result.exit_code != 0
+
+    def test_reports_remaining_count(self, runner, db_path, project_dir):
+        session = self._prepare_session(runner, db_path, project_dir)
+        q1 = _create_question(session.id, "pm", "cadrage", "Q1?", db_path=db_path)
+        _create_question(session.id, "pm", "cadrage", "Q2?", db_path=db_path)
+
+        with patch("squad.cli.get_global_db_path", return_value=db_path):
+            result = runner.invoke(cli, ["answer", session.id, q1.id, "A"], catch_exceptions=False)
+        assert "Remaining pending questions: 1" in result.output
+
+
+class TestResumeCommand:
+    def _prepare_session(self, runner, db_path, project_dir):
+        _run(runner, db_path, "start", str(project_dir), "Build CRM")
+        from squad.db import list_active_sessions
+
+        return list_active_sessions(db_path=db_path)[0]
+
+    def test_unknown_session_errors(self, runner, db_path):
+        with patch("squad.cli.get_global_db_path", return_value=db_path):
+            result = runner.invoke(cli, ["resume", "ghost"], catch_exceptions=False)
+        assert result.exit_code != 0
+
+    def test_resume_calls_pipeline(self, runner, db_path, project_dir):
+        session = self._prepare_session(runner, db_path, project_dir)
+        from squad.recovery import ResumePoint
+
+        with (
+            patch("squad.cli.get_global_db_path", return_value=db_path),
+            patch(
+                "squad.cli.resume_pipeline",
+                return_value=ResumePoint(
+                    session_id=session.id,
+                    phase="etat_des_lieux",
+                    reason="test",
+                ),
+            ) as mock_resume,
+        ):
+            result = runner.invoke(cli, ["resume", session.id], catch_exceptions=False)
+        assert result.exit_code == 0
+        mock_resume.assert_called_once()
+        assert "Resumed at phase etat_des_lieux" in result.output
+
+    def test_resume_terminal_says_nothing_to_resume(self, runner, db_path, project_dir):
+        session = self._prepare_session(runner, db_path, project_dir)
+        from squad.db import update_session_status
+
+        update_session_status(session.id, "done", db_path=db_path)
+        with (
+            patch("squad.cli.get_global_db_path", return_value=db_path),
+            patch("squad.cli.resume_pipeline", return_value=None),
+        ):
+            result = runner.invoke(cli, ["resume", session.id], catch_exceptions=False)
+        assert result.exit_code == 0
+        assert "Nothing to resume" in result.output

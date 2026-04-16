@@ -8,14 +8,22 @@ import click
 from squad import __version__
 from squad.config import get_global_db_path, get_project_state_dir
 from squad.db import (
+    answer_question,
     create_session,
     ensure_schema,
     get_session,
     list_active_sessions,
+    list_pending_questions,
     list_session_history,
 )
-from squad.pipeline import PipelineError, run_pipeline
-from squad.workspace import create_workspace, get_context, write_context, write_idea
+from squad.pipeline import PipelineError, resume_pipeline, run_pipeline
+from squad.workspace import (
+    create_workspace,
+    get_context,
+    sync_pending_questions,
+    write_context,
+    write_idea,
+)
 
 
 def _derive_title(idea: str, max_len: int = 60) -> str:
@@ -114,6 +122,55 @@ def status(session_id: str | None) -> None:
         for s in sessions:
             phase = s.current_phase or "—"
             click.echo(f"{s.id[:8]}  [{s.status:12s}]  {phase:20s}  {s.title}")
+
+
+@cli.command()
+@click.argument("session_id")
+@click.argument("question_id")
+@click.argument("answer_text")
+def answer(session_id: str, question_id: str, answer_text: str) -> None:
+    """Record an answer to a pending question and keep pending.json in sync."""
+    db_path = get_global_db_path()
+    ensure_schema(db_path)
+
+    session = get_session(session_id, db_path=db_path)
+    if session is None:
+        raise click.ClickException(f"Session not found: {session_id}")
+
+    answer_question(question_id, answer_text, db_path=db_path)
+    sync_pending_questions(session_id, db_path=db_path)
+
+    remaining = list_pending_questions(session_id, db_path=db_path)
+    click.echo(f"Answer recorded for question {question_id}.")
+    click.echo(f"Remaining pending questions: {len(remaining)}")
+
+
+@cli.command()
+@click.argument("session_id")
+def resume(session_id: str) -> None:
+    """Resume a paused or crashed session at its next safe phase."""
+    db_path = get_global_db_path()
+    ensure_schema(db_path)
+
+    session = get_session(session_id, db_path=db_path)
+    if session is None:
+        raise click.ClickException(f"Session not found: {session_id}")
+
+    try:
+        resume_point = resume_pipeline(session_id, db_path=db_path)
+    except PipelineError as exc:
+        raise click.ClickException(f"Pipeline failed: {exc}") from exc
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if resume_point is None:
+        click.echo(f"Nothing to resume (status: {session.status}).")
+        return
+
+    click.echo(f"Resumed at phase {resume_point.phase} — {resume_point.reason}")
+    final = get_session(session_id, db_path=db_path)
+    if final is not None:
+        click.echo(f"Pipeline finished with status: {final.status}")
 
 
 @cli.command()

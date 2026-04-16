@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 
 from squad.constants import PHASE_DIRS
-from squad.db import get_session
+from squad.db import get_session, list_pending_questions
 from squad.models import Session
 
 _MINIMAL_CONTEXT_TEMPLATE = """\
@@ -220,3 +220,22 @@ def read_pending_questions(session_id: str, db_path: Path | None = None) -> list
     if not questions_file.exists():
         return []
     return json.loads(questions_file.read_text(encoding="utf-8"))
+
+
+def sync_pending_questions(session_id: str, db_path: Path | None = None) -> Path:
+    """Rewrite ``questions/pending.json`` to match the DB's pending questions.
+
+    Called after ``squad answer`` records an answer so the filesystem stays
+    in sync with the DB. Returns the path to the (rewritten) file.
+    """
+    pending = list_pending_questions(session_id, db_path=db_path)
+    rows = [
+        {
+            "id": q.id,
+            "agent": q.agent,
+            "phase": q.phase,
+            "question": q.question,
+        }
+        for q in pending
+    ]
+    return write_pending_questions(session_id, rows, db_path=db_path)

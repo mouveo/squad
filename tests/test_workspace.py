@@ -293,3 +293,38 @@ class TestBenchmark:
     def test_unicode_preserved(self, session: Session, db_path: Path):
         write_benchmark(session.id, "unicode", "# Benchmark\néèà", db_path=db_path)
         assert "éèà" in read_benchmark(session.id, "unicode", db_path=db_path)
+
+
+# ── sync_pending_questions ─────────────────────────────────────────────────────
+
+
+from squad.db import answer_question, create_question  # noqa: E402
+from squad.workspace import sync_pending_questions  # noqa: E402
+
+
+class TestSyncPendingQuestions:
+    def test_writes_current_db_state(self, session: Session, workspace: Path, db_path: Path):
+        q1 = create_question(session.id, "pm", "cadrage", "q1?", db_path=db_path)
+        create_question(session.id, "pm", "cadrage", "q2?", db_path=db_path)
+        path = sync_pending_questions(session.id, db_path=db_path)
+        assert path.exists()
+        content = path.read_text()
+        assert q1.id in content
+        assert "q1?" in content
+        assert "q2?" in content
+
+    def test_drops_answered_questions(self, session: Session, workspace: Path, db_path: Path):
+        q1 = create_question(session.id, "pm", "cadrage", "q1?", db_path=db_path)
+        create_question(session.id, "pm", "cadrage", "q2?", db_path=db_path)
+        answer_question(q1.id, "answer", db_path=db_path)
+        sync_pending_questions(session.id, db_path=db_path)
+        content = (workspace / "questions" / "pending.json").read_text()
+        assert "q2?" in content
+        assert "q1?" not in content
+
+    def test_empty_when_all_answered(self, session: Session, workspace: Path, db_path: Path):
+        q = create_question(session.id, "pm", "cadrage", "only?", db_path=db_path)
+        answer_question(q.id, "yes", db_path=db_path)
+        sync_pending_questions(session.id, db_path=db_path)
+        content = (workspace / "questions" / "pending.json").read_text()
+        assert content.strip() == "[]"

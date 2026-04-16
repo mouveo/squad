@@ -265,6 +265,54 @@ def run_agents_parallel(
     return results
 
 
+def run_agents_tolerant(
+    agents_list: list[str],
+    session_id: str,
+    phase: str,
+    context_sections_by_agent: dict[str, list[str]] | None = None,
+    *,
+    cumulative_context: str | None = None,
+    phase_instruction: str | None = None,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Run multiple agents concurrently and always return ``(results, errors)``.
+
+    Unlike ``run_agents_parallel``, this helper never raises on a partial
+    failure. The orchestration layer is then free to apply
+    ``phase_config.is_critical_agent`` and decide whether to continue
+    (non-critical failure) or to mark the session as failed (critical
+    failure).
+    """
+    if not agents_list:
+        return {}, {}
+
+    context_map = context_sections_by_agent or {}
+    results: dict[str, str] = {}
+    errors: dict[str, str] = {}
+
+    with ThreadPoolExecutor(max_workers=len(agents_list)) as pool:
+        futures = {
+            pool.submit(
+                run_agent,
+                agent,
+                session_id,
+                phase,
+                context_map.get(agent),
+                cumulative_context=cumulative_context,
+                phase_instruction=phase_instruction,
+            ): agent
+            for agent in agents_list
+        }
+        for future in as_completed(futures):
+            agent = futures[future]
+            try:
+                results[agent] = future.result()
+            except Exception as exc:
+                logger.error("Agent %r failed: %s", agent, exc)
+                errors[agent] = str(exc)
+
+    return results, errors
+
+
 # ── generic task helpers ───────────────────────────────────────────────────────
 
 

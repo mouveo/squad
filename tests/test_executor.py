@@ -490,3 +490,62 @@ class TestRunAgentForwardsPromptParams:
         assert results == {"pm": "agent ok"}
         assert all("Shared idea text" in p for p in captured)
         assert all("Apply constraints X" in p for p in captured)
+
+
+# ── run_agents_tolerant (LOT 5) ────────────────────────────────────────────────
+
+
+from squad.executor import run_agents_tolerant  # noqa: E402
+
+
+class TestRunAgentsTolerant:
+    def test_returns_results_and_errors_tuple(self):
+        def _fake(cmd, timeout):
+            return _completed(_ndjson("ok"), returncode=0)
+
+        with patch("squad.executor._call_claude_cli", side_effect=_fake):
+            results, errors = run_agents_tolerant(["pm"], "s", "cadrage")
+        assert results == {"pm": "ok"}
+        assert errors == {}
+
+    def test_partial_failure_returns_both(self):
+        def _fake(cmd, timeout):
+            # Detect the agent from the dedicated "# Agent: <name>" header
+            prompt = cmd[cmd.index("--prompt") + 1]
+            if prompt.startswith("# Agent: ux"):
+                return _completed("", returncode=1, stderr="ux crash")
+            return _completed(_ndjson("ok"), returncode=0)
+
+        with patch("squad.executor._call_claude_cli", side_effect=_fake):
+            results, errors = run_agents_tolerant(["pm", "ux"], "s", "cadrage")
+        assert results == {"pm": "ok"}
+        assert "ux" in errors
+
+    def test_empty_agents_returns_empty_tuple(self):
+        assert run_agents_tolerant([], "s", "cadrage") == ({}, {})
+
+    def test_forwards_phase_instruction(self):
+        captured: list[str] = []
+
+        def _fake(cmd, timeout):
+            captured.append(cmd[cmd.index("--prompt") + 1])
+            return _completed(_ndjson("ok"), returncode=0)
+
+        with patch("squad.executor._call_claude_cli", side_effect=_fake):
+            run_agents_tolerant(
+                ["pm"],
+                "s",
+                "cadrage",
+                cumulative_context="ctx",
+                phase_instruction="Retry with X",
+            )
+        assert any("Retry with X" in p for p in captured)
+
+    def test_never_raises_on_agent_failure(self):
+        def _fake(cmd, timeout):
+            return _completed("", returncode=1, stderr="down")
+
+        with patch("squad.executor._call_claude_cli", side_effect=_fake):
+            results, errors = run_agents_tolerant(["pm", "ux"], "s", "cadrage")
+        assert results == {}
+        assert set(errors) == {"pm", "ux"}
