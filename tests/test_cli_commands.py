@@ -32,7 +32,16 @@ def runner() -> CliRunner:
 
 
 def _run(runner: CliRunner, db_path: Path, *args):
-    with patch("squad.cli.get_global_db_path", return_value=db_path):
+    """Invoke the CLI with a fake DB and a no-op pipeline.
+
+    The pipeline is mocked so ``squad start`` does not try to spawn Claude
+    CLI subprocesses during CLI-level tests. Pipeline behavior itself is
+    covered in ``test_pipeline.py``.
+    """
+    with (
+        patch("squad.cli.get_global_db_path", return_value=db_path),
+        patch("squad.cli.run_pipeline", return_value=None),
+    ):
         return runner.invoke(cli, list(args), catch_exceptions=False)
 
 
@@ -121,9 +130,40 @@ class TestStart:
         assert result.exit_code != 0
 
     def test_session_status_is_draft(self, runner, db_path, project_dir):
+        # With the pipeline mocked as a no-op (see _run), the session stays
+        # in its initial 'draft' state. Real pipeline transitions are tested
+        # in tests/test_pipeline.py.
         _run(runner, db_path, "start", str(project_dir), "my idea")
         sessions = list_active_sessions(db_path=db_path)
         assert sessions[0].status == "draft"
+
+    def test_calls_run_pipeline_with_session_id(self, runner, db_path, project_dir):
+        with (
+            patch("squad.cli.get_global_db_path", return_value=db_path),
+            patch("squad.cli.run_pipeline", return_value=None) as mock_pipeline,
+        ):
+            result = runner.invoke(
+                cli,
+                ["start", str(project_dir), "my idea"],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        assert mock_pipeline.call_count == 1
+        sessions = list_active_sessions(db_path=db_path)
+        assert mock_pipeline.call_args.args[0] == sessions[0].id
+
+    def test_pipeline_error_surfaces_as_click_exception(self, runner, db_path, project_dir):
+        from squad.pipeline import PipelineError
+
+        with (
+            patch("squad.cli.get_global_db_path", return_value=db_path),
+            patch("squad.cli.run_pipeline", side_effect=PipelineError("kaboom")),
+        ):
+            result = runner.invoke(
+                cli, ["start", str(project_dir), "my idea"], catch_exceptions=False
+            )
+        assert result.exit_code != 0
+        assert "kaboom" in result.output or "Pipeline failed" in result.output
 
 
 # ── squad status ───────────────────────────────────────────────────────────────

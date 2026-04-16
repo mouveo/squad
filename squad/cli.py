@@ -14,6 +14,7 @@ from squad.db import (
     list_active_sessions,
     list_session_history,
 )
+from squad.pipeline import PipelineError, run_pipeline
 from squad.workspace import create_workspace, get_context, write_context, write_idea
 
 
@@ -74,6 +75,17 @@ def start(project_path: str, idea: str, mode: str) -> None:
     click.echo(f"  Mode    : {session.mode}")
     click.echo(f"  Project : {session.project_path}")
     click.echo(f"  Status  : {session.status}")
+
+    try:
+        run_pipeline(session.id, db_path=db_path)
+    except PipelineError as exc:
+        raise click.ClickException(f"Pipeline failed: {exc}")
+    except Exception as exc:
+        raise click.ClickException(f"Pipeline failed: {exc}")
+
+    final = get_session(session.id, db_path=db_path)
+    if final is not None:
+        click.echo(f"Pipeline finished with status: {final.status}")
 
 
 @cli.command()
