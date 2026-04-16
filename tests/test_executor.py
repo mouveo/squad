@@ -8,6 +8,7 @@ import pytest
 
 from squad.executor import (
     AgentError,
+    _extract_json,
     _extract_text,
     build_agent_prompt,
     load_agent_definition,
@@ -15,6 +16,8 @@ from squad.executor import (
     parse_agent_capabilities,
     run_agent,
     run_agents_parallel,
+    run_task_json,
+    run_task_text,
 )
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -292,3 +295,112 @@ class TestRunAgentsParallel:
         mock_run.return_value = "output"
         run_agents_parallel(["pm"], "sess-1", "cadrage")
         assert mock_run.call_args.args[3] is None
+
+
+# ── _extract_json ──────────────────────────────────────────────────────────────
+
+
+class TestExtractJson:
+    def test_parses_bare_json(self):
+        result = _extract_json('{"key": "value"}')
+        assert result == {"key": "value"}
+
+    def test_parses_json_in_code_fence(self):
+        text = '```json\n{"subject_type": "saas"}\n```'
+        assert _extract_json(text) == {"subject_type": "saas"}
+
+    def test_parses_json_in_generic_fence(self):
+        text = '```\n{"a": 1}\n```'
+        assert _extract_json(text) == {"a": 1}
+
+    def test_extracts_json_from_prose(self):
+        text = 'Here is the result:\n{"score": 42}\nThat is all.'
+        assert _extract_json(text) == {"score": 42}
+
+    def test_raises_value_error_for_non_json(self):
+        with pytest.raises(ValueError, match="No JSON object found"):
+            _extract_json("This is just plain text with no JSON.")
+
+    def test_parses_nested_json(self):
+        data = {"outer": {"inner": [1, 2, 3]}}
+        assert _extract_json(json.dumps(data)) == data
+
+
+# ── run_task_text ──────────────────────────────────────────────────────────────
+
+
+class TestRunTaskText:
+    @patch("squad.executor._call_claude_cli")
+    def test_returns_text_on_success(self, mock_cli):
+        mock_cli.return_value = _completed(stdout=_ndjson("Hello from task"))
+        result = run_task_text("Do something")
+        assert result == "Hello from task"
+
+    @patch("squad.executor._call_claude_cli")
+    def test_raises_on_nonzero_exit(self, mock_cli):
+        mock_cli.return_value = _completed(returncode=1, stderr="boom")
+        with pytest.raises(AgentError, match="Task failed with code"):
+            run_task_text("Do something")
+
+    @patch("squad.executor._call_claude_cli")
+    def test_raises_on_empty_output(self, mock_cli):
+        mock_cli.return_value = _completed(stdout="")
+        with pytest.raises(AgentError, match="empty output"):
+            run_task_text("Do something")
+
+    @patch("squad.executor._call_claude_cli")
+    def test_raises_on_timeout(self, mock_cli):
+        mock_cli.side_effect = subprocess.TimeoutExpired(cmd=[], timeout=120)
+        with pytest.raises(AgentError, match="timed out"):
+            run_task_text("Do something", timeout=120)
+
+    @patch("squad.executor._call_claude_cli")
+    def test_passes_model_to_cmd(self, mock_cli):
+        mock_cli.return_value = _completed(stdout=_ndjson("ok"))
+        run_task_text("prompt", model="claude-sonnet-4-6")
+        cmd = mock_cli.call_args[0][0]
+        assert "claude-sonnet-4-6" in cmd
+
+    @patch("squad.executor._call_claude_cli")
+    def test_passes_allowed_tools_to_cmd(self, mock_cli):
+        mock_cli.return_value = _completed(stdout=_ndjson("ok"))
+        run_task_text("prompt", allowed_tools=["WebSearch"])
+        cmd = mock_cli.call_args[0][0]
+        assert "--allowedTools" in cmd
+        assert "WebSearch" in cmd[cmd.index("--allowedTools") + 1]
+
+    @patch("squad.executor._call_claude_cli")
+    def test_no_allowed_tools_flag_when_none(self, mock_cli):
+        mock_cli.return_value = _completed(stdout=_ndjson("ok"))
+        run_task_text("prompt", allowed_tools=None)
+        cmd = mock_cli.call_args[0][0]
+        assert "--allowedTools" not in cmd
+
+
+# ── run_task_json ──────────────────────────────────────────────────────────────
+
+
+class TestRunTaskJson:
+    @patch("squad.executor._call_claude_cli")
+    def test_returns_dict_on_success(self, mock_cli):
+        mock_cli.return_value = _completed(stdout=_ndjson('{"type": "saas"}'))
+        result = run_task_json("Classify this")
+        assert result == {"type": "saas"}
+
+    @patch("squad.executor._call_claude_cli")
+    def test_returns_dict_from_fenced_output(self, mock_cli):
+        fenced = '```json\n{"result": true}\n```'
+        mock_cli.return_value = _completed(stdout=_ndjson(fenced))
+        assert run_task_json("Classify") == {"result": True}
+
+    @patch("squad.executor._call_claude_cli")
+    def test_raises_value_error_for_non_json_output(self, mock_cli):
+        mock_cli.return_value = _completed(stdout=_ndjson("Not JSON at all."))
+        with pytest.raises(ValueError, match="No JSON object found"):
+            run_task_json("Classify")
+
+    @patch("squad.executor._call_claude_cli")
+    def test_raises_agent_error_on_cli_failure(self, mock_cli):
+        mock_cli.return_value = _completed(returncode=1, stderr="error")
+        with pytest.raises(AgentError):
+            run_task_json("Classify")

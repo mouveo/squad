@@ -1,4 +1,8 @@
-"""Wrapper for Claude CLI — loads agent definitions, runs agents, parses NDJSON output."""
+"""Wrapper for Claude CLI — loads agent definitions, runs agents, parses NDJSON output.
+
+All calls to the Claude Code CLI are centralised here. External modules must use
+`run_agent`, `run_task_text`, or `run_task_json`; never call `claude` directly.
+"""
 
 import json
 import logging
@@ -13,7 +17,9 @@ logger = logging.getLogger(__name__)
 
 _AGENTS_DIR = Path(__file__).parent.parent / "agents"
 _MODEL = "claude-opus-4-6"
+_MODEL_LIGHT = "claude-sonnet-4-6"
 _TIMEOUT = 900  # 15 minutes per agent
+_TIMEOUT_SHORT = 120  # 2 minutes for lightweight classification tasks
 
 # Only the three tools supported at Plan 1 scope
 _CAPABILITY_TO_TOOL: dict[str, str] = {
@@ -104,20 +110,38 @@ def _call_claude_cli(cmd: list[str], timeout: int) -> subprocess.CompletedProces
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 
-def _build_cmd(prompt: str, allowed_tools: list[str]) -> list[str]:
+def _build_cmd(prompt: str, allowed_tools: list[str], model: str = _MODEL) -> list[str]:
     cmd = [
         "claude",
         "--print",
         "--output-format",
         "stream-json",
         "--model",
-        _MODEL,
+        model,
         "--prompt",
         prompt,
     ]
     if allowed_tools:
         cmd.extend(["--allowedTools", ",".join(allowed_tools)])
     return cmd
+
+
+def _extract_json(text: str) -> dict:
+    """Extract a JSON object from text, handling optional markdown code fences."""
+    stripped = text.strip()
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        pass
+    # Try ```json ... ``` or ``` ... ``` fences
+    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", stripped, re.DOTALL)
+    if match:
+        return json.loads(match.group(1))
+    # Last resort: first { ... } block
+    match = re.search(r"\{.*\}", stripped, re.DOTALL)
+    if match:
+        return json.loads(match.group(0))
+    raise ValueError(f"No JSON object found in task output: {stripped[:200]!r}")
 
 
 # ── agent execution ────────────────────────────────────────────────────────────
@@ -191,3 +215,72 @@ def run_agents_parallel(
         raise AgentError(f"The following agents failed: {failed}")
 
     return results
+
+
+# ── generic task helpers ───────────────────────────────────────────────────────
+
+
+def run_task_text(
+    prompt: str,
+    model: str = _MODEL,
+    timeout: int = _TIMEOUT,
+    allowed_tools: list[str] | None = None,
+) -> str:
+    """Run a generic text task via Claude CLI.
+
+    Unlike run_agent, this helper is not tied to an agent markdown definition.
+    Use it for classification, summarisation, or any one-off Claude invocation.
+
+    Args:
+        prompt: Full prompt to send.
+        model: Claude model identifier (defaults to Opus).
+        timeout: Subprocess timeout in seconds.
+        allowed_tools: Claude CLI tool identifiers to allow (e.g. ["WebSearch"]).
+
+    Returns:
+        The concatenated text output from the NDJSON stream.
+
+    Raises:
+        AgentError: On non-zero exit, empty output, or timeout.
+    """
+    cmd = _build_cmd(prompt, allowed_tools or [], model=model)
+    try:
+        completed = _call_claude_cli(cmd, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise AgentError(f"Task timed out after {timeout}s") from exc
+    if completed.returncode != 0:
+        raise AgentError(
+            f"Task failed with code {completed.returncode}: {completed.stderr[:200]}"
+        )
+    text = _extract_text(completed.stdout)
+    if not text.strip():
+        raise AgentError("Task returned empty output")
+    return text
+
+
+def run_task_json(
+    prompt: str,
+    model: str = _MODEL,
+    timeout: int = _TIMEOUT,
+    allowed_tools: list[str] | None = None,
+) -> dict:
+    """Run a structured task via Claude CLI and parse the JSON response.
+
+    The model is expected to return a JSON object, optionally wrapped in a
+    markdown code fence. Uses the same Claude CLI path as all other executors.
+
+    Args:
+        prompt: Full prompt instructing the model to return JSON.
+        model: Claude model identifier (defaults to Opus).
+        timeout: Subprocess timeout in seconds.
+        allowed_tools: Claude CLI tool identifiers to allow.
+
+    Returns:
+        Parsed dict from the model's JSON response.
+
+    Raises:
+        AgentError: On execution failure.
+        ValueError: If the output cannot be parsed as JSON.
+    """
+    text = run_task_text(prompt, model=model, timeout=timeout, allowed_tools=allowed_tools)
+    return _extract_json(text)
