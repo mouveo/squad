@@ -36,44 +36,50 @@ def _send(payload: dict) -> None:
 
 def notify_questions_pending(session_id: str, title: str, count: int) -> None:
     """Notify that questions are awaiting user answers."""
-    _send({
-        "text": (
-            f"*[Squad]* {count} question(s) en attente de réponse\n"
-            f"Projet : *{title}*\n"
-            f"Session : `{session_id}`\n"
-            f"_Répondez via `squad answer {session_id}`_"
-        ),
-        "session_id": session_id,
-        "title": title,
-        "timestamp": _now_iso(),
-    })
+    _send(
+        {
+            "text": (
+                f"*[Squad]* {count} question(s) en attente de réponse\n"
+                f"Projet : *{title}*\n"
+                f"Session : `{session_id}`\n"
+                f"_Répondez via `squad answer {session_id}`_"
+            ),
+            "session_id": session_id,
+            "title": title,
+            "timestamp": _now_iso(),
+        }
+    )
 
 
 def notify_plans_ready(session_id: str, title: str, plan_count: int) -> None:
     """Notify that generated plans are ready for review."""
-    _send({
-        "text": (
-            f"*[Squad]* {plan_count} plan(s) prêt(s) pour validation\n"
-            f"Projet : *{title}*\n"
-            f"Session : `{session_id}`\n"
-            f"_Consultez via `squad review {session_id}`_"
-        ),
-        "session_id": session_id,
-        "title": title,
-        "timestamp": _now_iso(),
-    })
+    _send(
+        {
+            "text": (
+                f"*[Squad]* {plan_count} plan(s) prêt(s) pour validation\n"
+                f"Projet : *{title}*\n"
+                f"Session : `{session_id}`\n"
+                f"_Consultez via `squad review {session_id}`_"
+            ),
+            "session_id": session_id,
+            "title": title,
+            "timestamp": _now_iso(),
+        }
+    )
 
 
 def notify_agent_error(session_id: str, title: str, agent: str, error: str) -> None:
     """Notify of an agent or step execution error."""
-    _send({
-        "text": (
-            f"*[Squad]* :warning: Erreur agent `{agent}`\n"
-            f"Projet : *{title}*\n"
-            f"Session : `{session_id}`\n"
-            f"Erreur : {error[:200]}"
-        ),
-        "session_id": session_id,
-        "title": title,
-        "timestamp": _now_iso(),
-    })
+    _send(
+        {
+            "text": (
+                f"*[Squad]* :warning: Erreur agent `{agent}`\n"
+                f"Projet : *{title}*\n"
+                f"Session : `{session_id}`\n"
+                f"Erreur : {error[:200]}"
+            ),
+            "session_id": session_id,
+            "title": title,
+            "timestamp": _now_iso(),
+        }
+    )

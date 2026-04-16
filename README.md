@@ -13,8 +13,30 @@ pip install -e .
 ## CLI disponible
 
 ```bash
-squad version     # Affiche la version
-squad --help      # Aide
+# Démarrer une session
+squad start <project_path> "idée en quelques mots" [--mode approval|autonomous]
+
+# Voir l'état d'une session ou lister les sessions actives
+squad status [session_id]
+
+# Consulter l'historique des sessions
+squad history [--project <path>] [--limit 10]
+
+# Version
+squad version
+```
+
+### Exemple
+
+```bash
+squad start ~/Developer/myapp "Ajouter un module CRM avec suivi des leads"
+# → Session started: a3f7c1b2-...
+# →   Title   : Ajouter un module CRM avec suivi des leads
+# →   Mode    : approval
+# →   Status  : draft
+
+squad status
+# → a3f7c1b2  [draft       ]  —                     Ajouter un module CRM…
 ```
 
 ## Prérequis
@@ -24,7 +46,7 @@ squad --help      # Aide
 
 ## Roadmap
 
-Les commandes `start`, `status`, `history`, `answer`, `resume`, `review`, `approve` ainsi que l'orchestration multi-phase, la génération de plans Forge et les notifications Slack sont en cours de développement (Plans 2 et 3).
+Les commandes `answer`, `resume`, `review`, `approve` ainsi que l'orchestration multi-phase, la génération de plans Forge et les notifications Slack sont en cours de développement (Plans 2 et 3).
 
 ## Licence
 

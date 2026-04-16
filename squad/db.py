@@ -175,12 +175,13 @@ def create_session(
     idea: str,
     mode: str = MODE_APPROVAL,
     db_path: Path | None = None,
+    session_id: str | None = None,
 ) -> Session:
     """Insert a new session and return it."""
     db = _open(db_path)
     now = _now()
     row = {
-        "id": str(uuid.uuid4()),
+        "id": session_id or str(uuid.uuid4()),
         "title": title,
         "project_path": str(project_path),
         "workspace_path": str(workspace_path),
@@ -331,9 +332,7 @@ def create_question(
     return _to_question(row)
 
 
-def list_pending_questions(
-    session_id: str, db_path: Path | None = None
-) -> list[Question]:
+def list_pending_questions(session_id: str, db_path: Path | None = None) -> list[Question]:
     """Return unanswered questions for a session."""
     db = _open(db_path)
     rows = db["questions"].rows_where(
@@ -344,9 +343,7 @@ def list_pending_questions(
     return [_to_question(dict(r)) for r in rows]
 
 
-def answer_question(
-    question_id: str, answer: str, db_path: Path | None = None
-) -> None:
+def answer_question(question_id: str, answer: str, db_path: Path | None = None) -> None:
     """Record an answer for a question."""
     db = _open(db_path)
     db["questions"].update(

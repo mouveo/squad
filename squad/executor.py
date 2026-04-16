@@ -40,9 +40,7 @@ def load_agent_definition(agent_name: str) -> str:
 
 def parse_agent_capabilities(agent_definition: str) -> dict[str, bool]:
     """Parse the 'Outils autorisés' section and return {capability: enabled}."""
-    section = re.search(
-        r"## Outils autorisés\n(.*?)(?:\n##|$)", agent_definition, re.DOTALL
-    )
+    section = re.search(r"## Outils autorisés\n(.*?)(?:\n##|$)", agent_definition, re.DOTALL)
     if not section:
         return {}
     result: dict[str, bool] = {}
@@ -53,11 +51,7 @@ def parse_agent_capabilities(agent_definition: str) -> dict[str, bool]:
 
 def map_allowed_tools(capabilities: dict[str, bool]) -> list[str]:
     """Map agent capabilities to Claude CLI --allowedTools identifiers (Plan 1 subset)."""
-    return [
-        tool
-        for cap, tool in _CAPABILITY_TO_TOOL.items()
-        if capabilities.get(cap, False)
-    ]
+    return [tool for cap, tool in _CAPABILITY_TO_TOOL.items() if capabilities.get(cap, False)]
 
 
 # ── prompt builder ─────────────────────────────────────────────────────────────
@@ -105,9 +99,7 @@ def _extract_text(ndjson_output: str) -> str:
 # ── subprocess interface ───────────────────────────────────────────────────────
 
 
-def _call_claude_cli(
-    cmd: list[str], timeout: int
-) -> subprocess.CompletedProcess:
+def _call_claude_cli(cmd: list[str], timeout: int) -> subprocess.CompletedProcess:
     """Run the Claude CLI subprocess. Isolated here to allow mocking in tests."""
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
@@ -116,9 +108,12 @@ def _build_cmd(prompt: str, allowed_tools: list[str]) -> list[str]:
     cmd = [
         "claude",
         "--print",
-        "--output-format", "stream-json",
-        "--model", _MODEL,
-        "--prompt", prompt,
+        "--output-format",
+        "stream-json",
+        "--model",
+        _MODEL,
+        "--prompt",
+        prompt,
     ]
     if allowed_tools:
         cmd.extend(["--allowedTools", ",".join(allowed_tools)])
@@ -159,9 +154,7 @@ def run_agent(
                 continue
             return text
         except subprocess.TimeoutExpired:
-            last_error = AgentError(
-                f"Agent {agent_name!r} timed out after {_TIMEOUT}s"
-            )
+            last_error = AgentError(f"Agent {agent_name!r} timed out after {_TIMEOUT}s")
 
     raise last_error or AgentError(f"Agent {agent_name!r} failed after 2 attempts")
 

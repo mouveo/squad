@@ -51,9 +51,7 @@ def create_workspace(session: Session) -> Path:
     return workspace
 
 
-def get_session_workspace(
-    session_id: str, db_path: Path | None = None
-) -> Path:
+def get_session_workspace(session_id: str, db_path: Path | None = None) -> Path:
     """Return the workspace Path for a session, resolved from the DB."""
     return _ws(session_id, db_path)
 
@@ -61,9 +59,7 @@ def get_session_workspace(
 # ── idea and context ───────────────────────────────────────────────────────────
 
 
-def write_idea(
-    session_id: str, idea: str, db_path: Path | None = None
-) -> Path:
+def write_idea(session_id: str, idea: str, db_path: Path | None = None) -> Path:
     """Write idea.md to the session workspace and return its path."""
     workspace = _ws(session_id, db_path)
     idea_file = workspace / "idea.md"
@@ -71,9 +67,7 @@ def write_idea(
     return idea_file
 
 
-def write_context(
-    session_id: str, content: str, db_path: Path | None = None
-) -> Path:
+def write_context(session_id: str, content: str, db_path: Path | None = None) -> Path:
     """Write context.md to the session workspace and return its path."""
     workspace = _ws(session_id, db_path)
     context_file = workspace / "context.md"
@@ -150,9 +144,7 @@ def write_plan(
     return plan_file
 
 
-def list_plans(
-    session_id: str, db_path: Path | None = None
-) -> list[Path]:
+def list_plans(session_id: str, db_path: Path | None = None) -> list[Path]:
     """Return sorted list of plan file paths for a session."""
     workspace = _ws(session_id, db_path)
     return sorted((workspace / "plans").glob("*.md"))
@@ -173,9 +165,7 @@ def write_pending_questions(
     return questions_file
 
 
-def read_pending_questions(
-    session_id: str, db_path: Path | None = None
-) -> list[dict]:
+def read_pending_questions(session_id: str, db_path: Path | None = None) -> list[dict]:
     """Return pending questions list, or [] if no file exists."""
     workspace = _ws(session_id, db_path)
     questions_file = workspace / "questions" / "pending.json"

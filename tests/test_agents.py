@@ -130,9 +130,7 @@ class TestNoPlaceholders:
     def test_no_unreplaced_placeholders(self, filename: str):
         content = _read(filename)
         matches = PLACEHOLDER_PATTERN.findall(content)
-        assert not matches, (
-            f"{filename} contains unreplaced placeholders: {matches}"
-        )
+        assert not matches, f"{filename} contains unreplaced placeholders: {matches}"
 
 
 # ── content depth ──────────────────────────────────────────────────────────────

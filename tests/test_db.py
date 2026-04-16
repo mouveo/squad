@@ -63,12 +63,7 @@ class TestEnsureSchema:
         from sqlite_utils import Database
 
         db = Database(db_path)
-        index_cols = {
-            col
-            for table in db.tables
-            for idx in table.indexes
-            for col in idx.columns
-        }
+        index_cols = {col for table in db.tables for idx in table.indexes for col in idx.columns}
         assert "status" in index_cols
         assert "project_path" in index_cols
         assert "session_id" in index_cols
@@ -210,8 +205,14 @@ class TestPhaseOutputs:
     def test_optional_fields(self, db_path: Path):
         s = _session(db_path)
         po = create_phase_output(
-            s.id, PHASE_CADRAGE, "pm", "out", "/f.md",
-            duration_seconds=12.5, tokens_used=800, db_path=db_path,
+            s.id,
+            PHASE_CADRAGE,
+            "pm",
+            "out",
+            "/f.md",
+            duration_seconds=12.5,
+            tokens_used=800,
+            db_path=db_path,
         )
         assert po.duration_seconds == 12.5
         assert po.tokens_used == 800

@@ -39,6 +39,7 @@ from squad.models import (
 
 # ── constants ──────────────────────────────────────────────────────────────────
 
+
 class TestPhaseConstants:
     def test_phases_order(self):
         assert PHASES == [
@@ -80,8 +81,14 @@ class TestPhaseConstants:
 class TestSessionStatusConstants:
     def test_all_statuses_present(self):
         assert set(SESSION_STATUSES) == {
-            "draft", "interviewing", "working", "review",
-            "approved", "queued", "done", "failed",
+            "draft",
+            "interviewing",
+            "working",
+            "review",
+            "approved",
+            "queued",
+            "done",
+            "failed",
         }
 
     def test_status_values(self):
@@ -107,7 +114,11 @@ class TestSessionModeConstants:
 class TestAgentCapabilityConstants:
     def test_all_capabilities_present(self):
         assert set(AGENT_CAPABILITIES) == {
-            "web_search", "web_fetch", "read_files", "write_files", "execute_commands",
+            "web_search",
+            "web_fetch",
+            "read_files",
+            "write_files",
+            "execute_commands",
         }
 
     def test_capability_values(self):
@@ -119,6 +130,7 @@ class TestAgentCapabilityConstants:
 
 
 # ── enums ──────────────────────────────────────────────────────────────────────
+
 
 class TestSessionStatusEnum:
     def test_values_match_constants(self):
@@ -138,6 +150,7 @@ class TestSessionModeEnum:
 
 
 # ── models ─────────────────────────────────────────────────────────────────────
+
 
 class TestSession:
     def _make(self, **kwargs) -> Session:
