@@ -404,3 +404,89 @@ class TestRunTaskJson:
         mock_cli.return_value = _completed(returncode=1, stderr="error")
         with pytest.raises(AgentError):
             run_task_json("Classify")
+
+
+# ── prompt boundary: cumulative_context + phase_instruction (LOT 4) ────────────
+
+
+class TestBuildAgentPromptPromptBoundary:
+    def test_cumulative_context_rendered_as_section(self):
+        prompt = build_agent_prompt(
+            "pm",
+            "sess-1",
+            "cadrage",
+            cumulative_context="## Idée\n\nBuild a CRM",
+        )
+        assert "## Context" in prompt
+        assert "Build a CRM" in prompt
+
+    def test_phase_instruction_rendered_as_block(self):
+        prompt = build_agent_prompt(
+            "pm",
+            "sess-1",
+            "cadrage",
+            phase_instruction="Retry with tighter scope",
+        )
+        assert "## Phase instruction" in prompt
+        assert "Retry with tighter scope" in prompt
+
+    def test_cumulative_context_joins_with_sections(self):
+        prompt = build_agent_prompt(
+            "pm",
+            "sess-1",
+            "cadrage",
+            context_sections=["first"],
+            cumulative_context="second",
+        )
+        assert "first" in prompt
+        assert "second" in prompt
+        # Sections are separated by "---"
+        assert "---" in prompt.split("## Context")[1]
+
+    def test_no_context_block_when_nothing_provided(self):
+        prompt = build_agent_prompt("pm", "sess-1", "cadrage")
+        assert "## Context" not in prompt
+
+
+class TestRunAgentForwardsPromptParams:
+    def test_run_agent_forwards_cumulative_context(self):
+        captured: dict = {}
+
+        def _fake_cli(cmd, timeout):
+            # Capture the rendered prompt from the subprocess command args
+            prompt_idx = cmd.index("--prompt") + 1
+            captured["prompt"] = cmd[prompt_idx]
+            return _completed(_ndjson("ok output"), returncode=0)
+
+        with patch("squad.executor._call_claude_cli", side_effect=_fake_cli):
+            out = run_agent(
+                "pm",
+                "sess-1",
+                "cadrage",
+                cumulative_context="## Idée\n\nTest idea",
+                phase_instruction="Be concise",
+            )
+        assert out == "ok output"
+        assert "Test idea" in captured["prompt"]
+        assert "## Phase instruction" in captured["prompt"]
+        assert "Be concise" in captured["prompt"]
+
+    def test_run_agents_parallel_forwards_shared_context(self):
+        captured: list[str] = []
+
+        def _fake_cli(cmd, timeout):
+            prompt_idx = cmd.index("--prompt") + 1
+            captured.append(cmd[prompt_idx])
+            return _completed(_ndjson("agent ok"), returncode=0)
+
+        with patch("squad.executor._call_claude_cli", side_effect=_fake_cli):
+            results = run_agents_parallel(
+                ["pm"],
+                "sess-1",
+                "cadrage",
+                cumulative_context="Shared idea text",
+                phase_instruction="Apply constraints X",
+            )
+        assert results == {"pm": "agent ok"}
+        assert all("Shared idea text" in p for p in captured)
+        assert all("Apply constraints X" in p for p in captured)
