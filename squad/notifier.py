@@ -83,3 +83,51 @@ def notify_agent_error(session_id: str, title: str, agent: str, error: str) -> N
             "timestamp": _now_iso(),
         }
     )
+
+
+def notify_pause(session_id: str, title: str, count: int) -> None:
+    """Notify that the pipeline paused waiting for user answers.
+
+    Alias of ``notify_questions_pending`` kept for symmetry with the other
+    pipeline-event notifiers (``notify_plans_ready``, ``notify_queued``…).
+    """
+    notify_questions_pending(session_id, title, count)
+
+
+def notify_fallback_review(session_id: str, title: str, reason: str) -> None:
+    """Notify that autonomous submission to Forge failed; session is now in review.
+
+    Sent when ``squad.forge_bridge`` cannot push plans because Forge is
+    missing, unreachable, or the queue is busy. Plans are preserved in
+    the workspace; a human can intervene with ``squad approve``.
+    """
+    _send(
+        {
+            "text": (
+                f"*[Squad]* :warning: Forge indisponible — bascule vers *review*\n"
+                f"Projet : *{title}*\n"
+                f"Session : `{session_id}`\n"
+                f"Raison : {reason[:200]}\n"
+                f"_Consultez via `squad review {session_id}`_"
+            ),
+            "session_id": session_id,
+            "title": title,
+            "timestamp": _now_iso(),
+        }
+    )
+
+
+def notify_queued(session_id: str, title: str, plan_count: int) -> None:
+    """Notify that plans have been submitted to Forge's queue."""
+    _send(
+        {
+            "text": (
+                f"*[Squad]* :rocket: {plan_count} plan(s) envoyé(s) à la queue Forge\n"
+                f"Projet : *{title}*\n"
+                f"Session : `{session_id}`"
+            ),
+            "session_id": session_id,
+            "title": title,
+            "timestamp": _now_iso(),
+        }
+    )

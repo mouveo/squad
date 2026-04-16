@@ -7,6 +7,12 @@ import click
 
 from squad import __version__
 from squad.config import get_global_db_path, get_project_state_dir
+from squad.constants import (
+    MODE_AUTONOMOUS,
+    STATUS_APPROVED,
+    STATUS_FAILED,
+    STATUS_REVIEW,
+)
 from squad.db import (
     answer_question,
     create_session,
@@ -15,7 +21,18 @@ from squad.db import (
     list_active_sessions,
     list_pending_questions,
     list_session_history,
+    update_session_status,
 )
+from squad.db import (
+    list_plans as db_list_plans,
+)
+from squad.forge_bridge import (
+    ForgeQueueBusy,
+    ForgeUnavailable,
+    submit_session_to_forge,
+)
+from squad.forge_format import validate_plan
+from squad.notifier import notify_fallback_review, notify_queued
 from squad.pipeline import PipelineError, resume_pipeline, run_pipeline
 from squad.workspace import (
     create_workspace,
@@ -23,6 +40,7 @@ from squad.workspace import (
     sync_pending_questions,
     write_context,
     write_idea,
+    write_plan,
 )
 
 
@@ -94,6 +112,29 @@ def start(project_path: str, idea: str, mode: str) -> None:
     final = get_session(session.id, db_path=db_path)
     if final is not None:
         click.echo(f"Pipeline finished with status: {final.status}")
+
+    # Autonomous mode: push the generated plans straight to Forge. On any
+    # bridge failure, fall back to review (plans stay in the workspace).
+    if final is not None and final.mode == MODE_AUTONOMOUS and final.status == STATUS_REVIEW:
+        _autonomous_submit(session.id, final.title, db_path=db_path)
+
+
+def _autonomous_submit(session_id: str, title: str, db_path: Path) -> None:
+    """Submit plans to Forge for an autonomous session; fall back to review on error."""
+    try:
+        outcome = submit_session_to_forge(session_id, db_path=db_path)
+    except (ForgeUnavailable, ForgeQueueBusy, ValueError) as exc:
+        notify_fallback_review(session_id, title, str(exc))
+        click.echo(
+            f"Autonomous submit failed ({exc}); session left in review "
+            f"status — run `squad approve {session_id}` once Forge is available."
+        )
+        return
+    notify_queued(session_id, title, outcome.plans_sent)
+    click.echo(
+        f"Autonomous submit ok: {outcome.plans_sent} plan(s) queued "
+        f"(queue_started={outcome.queue_started})."
+    )
 
 
 @cli.command()
@@ -171,6 +212,115 @@ def resume(session_id: str) -> None:
     final = get_session(session_id, db_path=db_path)
     if final is not None:
         click.echo(f"Pipeline finished with status: {final.status}")
+
+
+@cli.command()
+@click.argument("session_id")
+@click.option(
+    "--action",
+    type=click.Choice(["show", "approve", "reject", "edit"]),
+    default="show",
+    show_default=True,
+    help="Action to perform on the reviewed plans.",
+)
+def review(session_id: str, action: str) -> None:
+    """Review generated plans for SESSION_ID and optionally approve/reject/edit.
+
+    Without ``--action`` (or with ``show``), prints each plan and its
+    workspace path. ``--action approve`` flips the session to
+    ``approved`` (leaving actual submission to ``squad approve``).
+    ``--action reject`` marks the session as ``failed``. ``--action edit``
+    opens each plan in ``$EDITOR``; edits must keep the Forge format.
+    """
+    db_path = get_global_db_path()
+    ensure_schema(db_path)
+
+    session = get_session(session_id, db_path=db_path)
+    if session is None:
+        raise click.ClickException(f"Session not found: {session_id}")
+
+    plans = db_list_plans(session_id, db_path=db_path)
+    if not plans:
+        raise click.ClickException(f"No plans to review for session {session_id}")
+
+    click.echo(f"Session {session_id} — mode={session.mode} status={session.status}")
+    click.echo(f"Project: {session.project_path}")
+    click.echo(f"Plans  : {len(plans)}")
+
+    if action == "show":
+        for plan in plans:
+            click.echo(f"\n=== {plan.title} ({plan.file_path}) ===\n")
+            click.echo(plan.content)
+        return
+
+    if action == "approve":
+        update_session_status(session_id, STATUS_APPROVED, db_path=db_path)
+        click.echo(
+            f"Session {session_id} marked as approved. "
+            f"Run `squad approve {session_id}` to push plans to Forge."
+        )
+        return
+
+    if action == "reject":
+        update_session_status(session_id, STATUS_FAILED, db_path=db_path)
+        click.echo(f"Session {session_id} marked as failed.")
+        return
+
+    # action == "edit"
+    for plan in plans:
+        click.echo(f"\nOpening editor for plan: {plan.title}")
+        edited = click.edit(plan.content)
+        if edited is None:
+            click.echo(f"  (no changes to {plan.title})")
+            continue
+        result = validate_plan(edited)
+        if not result.valid:
+            raise click.ClickException(
+                f"Edited plan {plan.title!r} is invalid: " + "; ".join(result.errors)
+            )
+        # Persist the edited version in the workspace and DB
+        write_plan(session_id, plan.title, edited, db_path=db_path)
+        click.echo(f"  Saved edited {plan.title}")
+
+
+@cli.command()
+@click.argument("session_id")
+def approve(session_id: str) -> None:
+    """Send the approved plans of SESSION_ID to Forge's queue.
+
+    Transitions the session from ``review`` or ``approved`` to ``queued``
+    on success. On any Forge failure the session stays in ``review`` and
+    a Slack notification is sent; the generated plans remain intact.
+    """
+    db_path = get_global_db_path()
+    ensure_schema(db_path)
+
+    session = get_session(session_id, db_path=db_path)
+    if session is None:
+        raise click.ClickException(f"Session not found: {session_id}")
+
+    if session.status not in {STATUS_REVIEW, STATUS_APPROVED}:
+        raise click.ClickException(
+            f"Session {session_id} is in status {session.status!r}; "
+            "expected 'review' or 'approved'."
+        )
+
+    if session.status == STATUS_REVIEW:
+        update_session_status(session_id, STATUS_APPROVED, db_path=db_path)
+
+    try:
+        outcome = submit_session_to_forge(session_id, db_path=db_path)
+    except (ForgeUnavailable, ForgeQueueBusy, ValueError) as exc:
+        update_session_status(session_id, STATUS_REVIEW, db_path=db_path)
+        notify_fallback_review(session_id, session.title, str(exc))
+        raise click.ClickException(
+            f"Forge submit failed: {exc}. Session reverted to review."
+        ) from exc
+
+    notify_queued(session_id, session.title, outcome.plans_sent)
+    click.echo(
+        f"Approved and queued {outcome.plans_sent} plan(s) (queue_started={outcome.queue_started})."
+    )
 
 
 @cli.command()
