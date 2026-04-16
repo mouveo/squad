@@ -150,6 +150,38 @@ def list_plans(session_id: str, db_path: Path | None = None) -> list[Path]:
     return sorted((workspace / "plans").glob("*.md"))
 
 
+def copy_plans_to_project(
+    session_id: str,
+    db_path: Path | None = None,
+) -> list[Path]:
+    """Copy every ``*.md`` in the workspace ``plans/`` dir to ``{project_path}/plans/``.
+
+    The target directory is created if missing. Existing files with the
+    same name are overwritten so re-runs stay predictable. Returns the
+    list of written target paths (sorted).
+    """
+    import shutil
+
+    session = get_session(session_id, db_path=db_path)
+    if session is None:
+        raise ValueError(f"Session not found: {session_id!r}")
+
+    workspace = _ws(session_id, db_path)
+    source_dir = workspace / "plans"
+    if not source_dir.exists():
+        return []
+
+    target_dir = Path(session.project_path) / "plans"
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    copied: list[Path] = []
+    for source in sorted(source_dir.glob("*.md")):
+        target = target_dir / source.name
+        shutil.copy2(source, target)
+        copied.append(target)
+    return copied
+
+
 # ── research / benchmark ───────────────────────────────────────────────────────
 
 

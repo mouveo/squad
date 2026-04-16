@@ -45,6 +45,7 @@ from squad.db import (
     update_session_status,
 )
 from squad.executor import AgentError, run_agent, run_agents_tolerant
+from squad.forge_format import ForgeFormatError
 from squad.phase_config import (
     PhaseConfig,
     get_phase_config,
@@ -55,6 +56,10 @@ from squad.phase_contracts import (
     ContractError,
     QuestionsContract,
     parse_questions_contract,
+)
+from squad.plan_generator import (
+    copy_plans_to_project,
+    generate_plans_from_session,
 )
 from squad.recovery import (
     ResumePoint,
@@ -333,12 +338,40 @@ def run_pipeline(
         )
         raise
 
+    # After the six phases complete, generate Forge plans from the
+    # synthesis contract, validate them and copy them to the target
+    # project. Failures here surface as PipelineError so the session
+    # ends up in 'failed' rather than 'review'.
+    try:
+        _generate_and_copy_plans(session_id, db_path=db_path)
+    except (ValueError, RuntimeError, ForgeFormatError) as exc:
+        logger.error("Plan generation failed for session %s: %s", session_id, exc)
+        update_session_status(
+            session_id=session_id,
+            status=STATUS_FAILED,
+            db_path=db_path,
+        )
+        raise PipelineError(f"Plan generation failed: {exc}") from exc
+
     update_session_status(
         session_id=session_id,
         status=STATUS_REVIEW,
         current_phase=PHASES[-1],
         db_path=db_path,
     )
+
+
+def _generate_and_copy_plans(session_id: str, db_path: Path | None = None) -> None:
+    """Run the plan generator and copy the resulting files into the project.
+
+    Split from ``run_pipeline`` so tests can patch a single symbol
+    (``squad.pipeline._generate_and_copy_plans``) when the LLM is not
+    available, and so the failure path stays localised.
+    """
+    drafts = generate_plans_from_session(session_id, db_path=db_path)
+    logger.info("Plan generation produced %d plan(s) for session %s", len(drafts), session_id)
+    copied = copy_plans_to_project(session_id, db_path=db_path)
+    logger.info("Copied %d plan file(s) into the target project", len(copied))
 
 
 def resume_pipeline(session_id: str, db_path: Path | None = None) -> ResumePoint | None:

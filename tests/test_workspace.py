@@ -328,3 +328,46 @@ class TestSyncPendingQuestions:
         sync_pending_questions(session.id, db_path=db_path)
         content = (workspace / "questions" / "pending.json").read_text()
         assert content.strip() == "[]"
+
+
+# ── copy_plans_to_project ──────────────────────────────────────────────────────
+
+
+from squad.workspace import copy_plans_to_project  # noqa: E402
+
+
+class TestCopyPlansToProject:
+    def test_copies_workspace_plans_to_project(
+        self, session: Session, workspace: Path, db_path: Path, project_path: Path
+    ):
+        (workspace / "plans" / "p1.md").write_text("content p1")
+        (workspace / "plans" / "p2.md").write_text("content p2")
+        copied = copy_plans_to_project(session.id, db_path=db_path)
+        assert len(copied) == 2
+        assert (project_path / "plans" / "p1.md").read_text() == "content p1"
+        assert (project_path / "plans" / "p2.md").read_text() == "content p2"
+
+    def test_overwrites_existing_target(
+        self, session: Session, workspace: Path, db_path: Path, project_path: Path
+    ):
+        (workspace / "plans" / "p1.md").write_text("v2")
+        (project_path / "plans").mkdir()
+        (project_path / "plans" / "p1.md").write_text("v1")
+        copy_plans_to_project(session.id, db_path=db_path)
+        assert (project_path / "plans" / "p1.md").read_text() == "v2"
+
+    def test_empty_when_no_plans(
+        self, session: Session, workspace: Path, db_path: Path, project_path: Path
+    ):
+        assert copy_plans_to_project(session.id, db_path=db_path) == []
+
+    def test_unknown_session_raises(self, db_path: Path):
+        with pytest.raises(ValueError):
+            copy_plans_to_project("ghost", db_path=db_path)
+
+    def test_creates_target_dir(
+        self, session: Session, workspace: Path, db_path: Path, project_path: Path
+    ):
+        (workspace / "plans" / "p.md").write_text("x")
+        copy_plans_to_project(session.id, db_path=db_path)
+        assert (project_path / "plans").is_dir()

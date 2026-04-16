@@ -73,6 +73,17 @@ def clean_challenge_output() -> str:
     return '# Challenge\n\nclean\n```json\n{"blockers": []}\n```'
 
 
+@pytest.fixture(autouse=True)
+def _stub_plan_generation():
+    """Stub the final plan-generation step so pipeline tests don't touch Claude.
+
+    Plan-generation logic is tested directly in ``test_plan_generator.py``.
+    Here the focus is on phase orchestration.
+    """
+    with patch("squad.pipeline._generate_and_copy_plans", return_value=None):
+        yield
+
+
 def _configure_mocks(
     run_agent_mock, run_tolerant_mock, pm_output: str, challenge_output: str = ""
 ) -> None:
