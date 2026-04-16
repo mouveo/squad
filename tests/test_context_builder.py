@@ -1,7 +1,6 @@
 """Tests for squad/context_builder.py — context assembly and research summarisation."""
 
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -21,7 +20,6 @@ from squad.context_builder import (
     summarize_research,
 )
 from squad.models import PhaseOutput, Session
-
 
 # ── fixtures ───────────────────────────────────────────────────────────────────
 

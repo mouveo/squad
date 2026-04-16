@@ -249,9 +249,7 @@ def run_task_text(
     except subprocess.TimeoutExpired as exc:
         raise AgentError(f"Task timed out after {timeout}s") from exc
     if completed.returncode != 0:
-        raise AgentError(
-            f"Task failed with code {completed.returncode}: {completed.stderr[:200]}"
-        )
+        raise AgentError(f"Task failed with code {completed.returncode}: {completed.stderr[:200]}")
     text = _extract_text(completed.stdout)
     if not text.strip():
         raise AgentError("Task returned empty output")

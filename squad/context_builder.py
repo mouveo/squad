@@ -124,8 +124,7 @@ def build_cumulative_context(
     answered = _get_answered_questions(session_id, db_path)
     if answered:
         qa_lines = [
-            f"**Q ({row['agent']}/{row['phase']}):** {row['question']}\n"
-            f"**R:** {row['answer']}"
+            f"**Q ({row['agent']}/{row['phase']}):** {row['question']}\n**R:** {row['answer']}"
             for row in answered
         ]
         parts.append("## Q&A\n\n" + "\n\n".join(qa_lines))
