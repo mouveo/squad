@@ -11,9 +11,12 @@ from squad.workspace import (
     create_workspace,
     get_context,
     get_session_workspace,
+    list_benchmarks,
     list_plans,
+    read_benchmark,
     read_pending_questions,
     read_phase_outputs,
+    write_benchmark,
     write_context,
     write_idea,
     write_pending_questions,
@@ -252,3 +255,41 @@ class TestPendingQuestions:
         write_pending_questions(session.id, questions, db_path=db_path)
         result = read_pending_questions(session.id, db_path=db_path)
         assert result[0]["question"] == "Quel est le périmètre ?"
+
+
+# ── research / benchmark ───────────────────────────────────────────────────────
+
+
+class TestBenchmark:
+    def test_write_returns_path(self, session: Session, workspace: Path, db_path: Path):
+        path = write_benchmark(session.id, "my-idea", "# Benchmark\ncontent", db_path=db_path)
+        assert path.exists()
+        assert path.parent == workspace / "research"
+        assert path.name == "benchmark-my-idea.md"
+
+    def test_write_slug_is_sanitised(self, session: Session, db_path: Path):
+        path = write_benchmark(session.id, "B2B SaaS / CRM !!", "body", db_path=db_path)
+        assert "b2b-saas" in path.name
+        assert "/" not in path.name
+
+    def test_read_returns_content(self, session: Session, db_path: Path):
+        write_benchmark(session.id, "s", "# Benchmark\nhi", db_path=db_path)
+        assert read_benchmark(session.id, "s", db_path=db_path) == "# Benchmark\nhi"
+
+    def test_read_missing_returns_none(self, session: Session, db_path: Path):
+        assert read_benchmark(session.id, "ghost", db_path=db_path) is None
+
+    def test_list_benchmarks_sorted(self, session: Session, db_path: Path):
+        write_benchmark(session.id, "beta", "b", db_path=db_path)
+        write_benchmark(session.id, "alpha", "a", db_path=db_path)
+        names = [p.name for p in list_benchmarks(session.id, db_path=db_path)]
+        assert names == ["benchmark-alpha.md", "benchmark-beta.md"]
+
+    def test_overwrite_existing_benchmark(self, session: Session, db_path: Path):
+        write_benchmark(session.id, "s", "v1", db_path=db_path)
+        write_benchmark(session.id, "s", "v2", db_path=db_path)
+        assert read_benchmark(session.id, "s", db_path=db_path) == "v2"
+
+    def test_unicode_preserved(self, session: Session, db_path: Path):
+        write_benchmark(session.id, "unicode", "# Benchmark\néèà", db_path=db_path)
+        assert "éèà" in read_benchmark(session.id, "unicode", db_path=db_path)

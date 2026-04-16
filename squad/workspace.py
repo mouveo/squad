@@ -150,6 +150,54 @@ def list_plans(session_id: str, db_path: Path | None = None) -> list[Path]:
     return sorted((workspace / "plans").glob("*.md"))
 
 
+# ── research / benchmark ───────────────────────────────────────────────────────
+
+
+def _benchmark_path(workspace: Path, slug: str) -> Path:
+    return workspace / "research" / f"benchmark-{_slugify(slug)}.md"
+
+
+def write_benchmark(
+    session_id: str,
+    slug: str,
+    content: str,
+    db_path: Path | None = None,
+) -> Path:
+    """Write a benchmark report under ``research/benchmark-{slug}.md``.
+
+    The slug is filename-safe; long or accented slugs are normalised. The
+    parent directory is created on demand (it already exists for sessions
+    created via ``create_workspace``).
+    """
+    workspace = _ws(session_id, db_path)
+    path = _benchmark_path(workspace, slug)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def read_benchmark(
+    session_id: str,
+    slug: str,
+    db_path: Path | None = None,
+) -> str | None:
+    """Return the benchmark content for ``slug``, or None if missing."""
+    workspace = _ws(session_id, db_path)
+    path = _benchmark_path(workspace, slug)
+    if not path.exists():
+        return None
+    return path.read_text(encoding="utf-8")
+
+
+def list_benchmarks(
+    session_id: str,
+    db_path: Path | None = None,
+) -> list[Path]:
+    """Return all benchmark report paths for a session, sorted by name."""
+    workspace = _ws(session_id, db_path)
+    return sorted((workspace / "research").glob("benchmark-*.md"))
+
+
 # ── questions ──────────────────────────────────────────────────────────────────
 
 
