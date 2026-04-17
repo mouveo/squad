@@ -20,6 +20,7 @@ from squad.constants import (
     SESSION_MODES,
     STATUS_APPROVED,
     STATUS_FAILED,
+    STATUS_INTERVIEWING,
     STATUS_REVIEW,
 )
 from squad.db import (
@@ -72,6 +73,31 @@ def _resolve_mode(project_path: str | None) -> str:
     if cfg_mode in SESSION_MODES:
         return cfg_mode
     return MODE_APPROVAL
+
+
+def _create_and_init_session(project_path: str, idea: str, mode: str, db_path: Path):
+    """Create a session row + workspace and persist the idea / project context.
+
+    Shared by ``start`` and ``run`` so both commands stay in sync. Returns
+    the persisted ``Session`` (already with workspace files on disk).
+    """
+    session_id = str(uuid.uuid4())
+    workspace_path = get_project_state_dir(project_path) / "sessions" / session_id
+    title = _derive_title(idea)
+    session = create_session(
+        title=title,
+        project_path=str(Path(project_path).resolve()),
+        workspace_path=str(workspace_path),
+        idea=idea,
+        mode=mode,
+        db_path=db_path,
+        session_id=session_id,
+    )
+    create_workspace(session)
+    write_idea(session.id, idea, db_path=db_path)
+    context = get_context(project_path)
+    write_context(session.id, context, db_path=db_path)
+    return session
 
 
 @click.group()
@@ -131,23 +157,7 @@ def start(project_path: str, idea: str, mode: str | None) -> None:
     if mode is None:
         mode = _resolve_mode(project_path)
 
-    session_id = str(uuid.uuid4())
-    workspace_path = get_project_state_dir(project_path) / "sessions" / session_id
-    title = _derive_title(idea)
-
-    session = create_session(
-        title=title,
-        project_path=str(Path(project_path).resolve()),
-        workspace_path=str(workspace_path),
-        idea=idea,
-        mode=mode,
-        db_path=db_path,
-        session_id=session_id,
-    )
-    create_workspace(session)
-    write_idea(session.id, idea, db_path=db_path)
-    context = get_context(project_path)
-    write_context(session.id, context, db_path=db_path)
+    session = _create_and_init_session(project_path, idea, mode, db_path)
 
     click.echo(f"Session started: {session.id}")
     click.echo(f"  Title   : {session.title}")
@@ -172,6 +182,63 @@ def start(project_path: str, idea: str, mode: str | None) -> None:
         _autonomous_submit(session.id, final.title, db_path=db_path)
 
 
+@cli.command(name="run")
+@click.argument("project_path", type=click.Path(exists=True, file_okay=False))
+@click.argument("idea")
+@click.option(
+    "--mode",
+    type=click.Choice(SESSION_MODES),
+    default=None,
+    help=(
+        "Execution mode (overrides the configured `mode` when provided). "
+        "Defaults to `approval`, which drives questions and review inline."
+    ),
+)
+def run_cmd(project_path: str, idea: str, mode: str | None) -> None:
+    """One-shot: start, answer pending questions inline, review, submit.
+
+    ``squad run`` orchestrates the same primitives as the asynchronous
+    commands (``start`` → ``answer`` → ``resume`` → ``review`` →
+    ``approve``) without chaining the CLI commands themselves. In
+    ``autonomous`` mode the interactive prompts are skipped and the
+    submission to Forge happens automatically when the pipeline reaches
+    ``review``.
+    """
+    db_path = get_global_db_path()
+    ensure_schema(db_path)
+
+    if mode is None:
+        mode = _resolve_mode(project_path)
+
+    session = _create_and_init_session(project_path, idea, mode, db_path)
+
+    click.echo(f"Session started: {session.id}")
+    click.echo(f"  Mode    : {session.mode}")
+    click.echo(f"  Project : {session.project_path}")
+
+    try:
+        run_pipeline(session.id, db_path=db_path)
+    except PipelineError as exc:
+        raise click.ClickException(f"Pipeline failed: {exc}") from exc
+
+    if session.mode == MODE_APPROVAL:
+        _drive_interactive_questions(session.id, db_path=db_path)
+
+    final = get_session(session.id, db_path=db_path)
+    if final is None:
+        raise click.ClickException(f"Session vanished: {session.id}")
+
+    click.echo(f"\nPipeline finished with status: {final.status}")
+
+    if final.status != STATUS_REVIEW:
+        return
+
+    if final.mode == MODE_AUTONOMOUS:
+        _autonomous_submit(session.id, final.title, db_path=db_path)
+    else:
+        _interactive_review_and_submit(session.id, final.title, db_path=db_path)
+
+
 def _autonomous_submit(session_id: str, title: str, db_path: Path) -> None:
     """Submit plans to Forge for an autonomous session; fall back to review on error."""
     try:
@@ -187,6 +254,100 @@ def _autonomous_submit(session_id: str, title: str, db_path: Path) -> None:
     click.echo(
         f"Autonomous submit ok: {outcome.plans_sent} plan(s) queued "
         f"(queue_started={outcome.queue_started})."
+    )
+
+
+# ── interactive helpers (used by `squad run`) ─────────────────────────────────
+
+
+def _drive_interactive_questions(session_id: str, db_path: Path) -> None:
+    """Loop while the session is paused on questions: ask, persist, resume.
+
+    Reuses ``answer_question`` + ``sync_pending_questions`` + ``resume_pipeline``
+    rather than shelling into the ``answer``/``resume`` commands so the
+    transition path stays single-sourced through the pipeline primitives.
+    """
+    while True:
+        session = get_session(session_id, db_path=db_path)
+        if session is None or session.status != STATUS_INTERVIEWING:
+            return
+
+        pending = list_pending_questions(session_id, db_path=db_path)
+        if not pending:
+            # Status says interviewing but nothing to ask — try to resume
+            # so the pipeline can re-evaluate and either advance or fail.
+            try:
+                resume_pipeline(session_id, db_path=db_path)
+            except PipelineError as exc:
+                raise click.ClickException(f"Pipeline failed during resume: {exc}") from exc
+            continue
+
+        click.echo(f"\n{len(pending)} question(s) en attente :")
+        for q in pending:
+            click.echo(f"\n  [{q.agent} / {q.phase}] {q.question}")
+            answer = click.prompt("  Réponse", default="", show_default=False).strip()
+            if not answer:
+                raise click.ClickException(
+                    "Empty answer; aborting interactive run "
+                    "(use `squad answer` to retry asynchronously)."
+                )
+            answer_question(q.id, answer, db_path=db_path)
+
+        sync_pending_questions(session_id, db_path=db_path)
+
+        try:
+            resume_pipeline(session_id, db_path=db_path)
+        except PipelineError as exc:
+            raise click.ClickException(f"Pipeline failed during resume: {exc}") from exc
+
+
+def _interactive_review_and_submit(session_id: str, title: str, db_path: Path) -> None:
+    """Display generated plans inline and prompt for approve / reject / quit.
+
+    On approve: persist ``approved`` then submit to Forge; on Forge error,
+    revert to ``review`` and notify (same fallback as ``squad approve``).
+    On reject: mark the session ``failed``. On quit: leave it in
+    ``review`` so the user can still drive it via ``squad review`` /
+    ``squad approve`` later.
+    """
+    plans = db_list_plans(session_id, db_path=db_path)
+    click.echo(f"\n{len(plans)} plan(s) prêt(s) pour validation :\n")
+    for plan in plans:
+        click.echo(f"=== {plan.title} ({plan.file_path}) ===\n")
+        click.echo(plan.content)
+        click.echo("")
+
+    decision = click.prompt(
+        "Approuver et envoyer à Forge ? [y]es / [n]o / [q]uit",
+        type=click.Choice(["y", "n", "q"]),
+        default="y",
+        show_choices=False,
+    )
+
+    if decision == "n":
+        update_session_status(session_id, STATUS_FAILED, db_path=db_path)
+        click.echo(f"Session {session_id} marquée comme failed.")
+        return
+    if decision == "q":
+        click.echo(
+            f"Session {session_id} laissée en review. "
+            f"Reprenez avec `squad review` ou `squad approve {session_id}`."
+        )
+        return
+
+    # decision == "y"
+    update_session_status(session_id, STATUS_APPROVED, db_path=db_path)
+    try:
+        outcome = submit_session_to_forge(session_id, db_path=db_path)
+    except (ForgeUnavailable, ForgeQueueBusy, ValueError) as exc:
+        update_session_status(session_id, STATUS_REVIEW, db_path=db_path)
+        notify_fallback_review(session_id, title, str(exc))
+        raise click.ClickException(
+            f"Forge submit failed: {exc}. Session reverted to review."
+        ) from exc
+    notify_queued(session_id, title, outcome.plans_sent)
+    click.echo(
+        f"Approved and queued {outcome.plans_sent} plan(s) (queue_started={outcome.queue_started})."
     )
 
 

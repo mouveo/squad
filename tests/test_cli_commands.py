@@ -664,3 +664,242 @@ class TestStartUsesConfigMode:
         assert result.exit_code == 0
         sessions = list_active_sessions(db_path=db_path)
         assert sessions[0].mode == "approval"
+
+
+# ── squad run (LOT 4 — Plan 3) ────────────────────────────────────────────────
+
+
+def _land_in_review(session_id, db_path=None):
+    """Pipeline stub that takes a session straight to review with one plan."""
+    update_session_status(session_id, "review", db_path=db_path)
+    create_plan(session_id, "p1", "/tmp/p1.md", "# plan 1", db_path=db_path)
+
+
+def _pause_with_question(session_id, db_path=None):
+    """Pipeline stub that pauses on one pending question."""
+    update_session_status(session_id, "interviewing", db_path=db_path)
+    _create_question(session_id, "pm", "cadrage", "Quel segment cible ?", db_path=db_path)
+
+
+class TestRunCommand:
+    def test_approval_interactive_flow_approves_and_submits(
+        self, runner: CliRunner, db_path: Path, project_dir: Path
+    ):
+        from squad.recovery import ResumePoint
+
+        def _fake_resume(session_id, db_path=None):
+            _land_in_review(session_id, db_path=db_path)
+            return ResumePoint(session_id=session_id, phase="cadrage", reason="resumed")
+
+        with (
+            patch("squad.cli.get_global_db_path", return_value=db_path),
+            patch("squad.cli.run_pipeline", side_effect=_pause_with_question),
+            patch("squad.cli.resume_pipeline", side_effect=_fake_resume),
+            patch(
+                "squad.cli.submit_session_to_forge",
+                return_value=SubmitOutcome(plans_sent=1, queue_started=True),
+            ) as m_submit,
+            patch("squad.cli.notify_queued") as m_notify,
+        ):
+            result = runner.invoke(
+                cli,
+                ["run", str(project_dir), "Build CRM"],
+                input="SMBs\ny\n",
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0, result.output
+        # Question was displayed and answered
+        assert "Quel segment cible ?" in result.output
+        # Submit happened, session is approved
+        m_submit.assert_called_once()
+        m_notify.assert_called_once()
+        from squad.db import get_session as _get
+
+        sess_id = list_active_sessions(db_path=db_path)[0].id
+        assert _get(sess_id, db_path=db_path).status == "approved"
+
+    def test_approval_no_questions_review_then_approve(
+        self, runner: CliRunner, db_path: Path, project_dir: Path
+    ):
+        with (
+            patch("squad.cli.get_global_db_path", return_value=db_path),
+            patch("squad.cli.run_pipeline", side_effect=_land_in_review),
+            patch(
+                "squad.cli.submit_session_to_forge",
+                return_value=SubmitOutcome(plans_sent=1, queue_started=True),
+            ) as m_submit,
+            patch("squad.cli.notify_queued"),
+        ):
+            result = runner.invoke(
+                cli,
+                ["run", str(project_dir), "idea"],
+                input="y\n",
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        m_submit.assert_called_once()
+
+    def test_approval_review_reject_marks_failed(
+        self, runner: CliRunner, db_path: Path, project_dir: Path
+    ):
+        with (
+            patch("squad.cli.get_global_db_path", return_value=db_path),
+            patch("squad.cli.run_pipeline", side_effect=_land_in_review),
+            patch("squad.cli.submit_session_to_forge") as m_submit,
+        ):
+            result = runner.invoke(
+                cli,
+                ["run", str(project_dir), "idea"],
+                input="n\n",
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        m_submit.assert_not_called()
+        from squad.db import get_session as _get
+        from squad.db import list_session_history as _hist
+
+        sess = _hist(db_path=db_path)[0]
+        assert _get(sess.id, db_path=db_path).status == "failed"
+
+    def test_approval_review_quit_keeps_review(
+        self, runner: CliRunner, db_path: Path, project_dir: Path
+    ):
+        with (
+            patch("squad.cli.get_global_db_path", return_value=db_path),
+            patch("squad.cli.run_pipeline", side_effect=_land_in_review),
+            patch("squad.cli.submit_session_to_forge") as m_submit,
+        ):
+            result = runner.invoke(
+                cli,
+                ["run", str(project_dir), "idea"],
+                input="q\n",
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        m_submit.assert_not_called()
+        from squad.db import get_session as _get
+
+        sess = list_active_sessions(db_path=db_path)[0]
+        assert _get(sess.id, db_path=db_path).status == "review"
+
+    def test_autonomous_skips_questions_and_submits(
+        self, runner: CliRunner, db_path: Path, project_dir: Path
+    ):
+        """In autonomous mode, no interactive prompts; auto-submit on review."""
+
+        with (
+            patch("squad.cli.get_global_db_path", return_value=db_path),
+            patch("squad.cli.run_pipeline", side_effect=_land_in_review),
+            patch(
+                "squad.cli.submit_session_to_forge",
+                return_value=SubmitOutcome(plans_sent=1, queue_started=True),
+            ) as m_submit,
+            patch("squad.cli.notify_queued") as m_notify,
+            # No resume_pipeline calls expected — detect any leakage.
+            patch("squad.cli.resume_pipeline") as m_resume,
+        ):
+            result = runner.invoke(
+                cli,
+                ["run", str(project_dir), "idea", "--mode", "autonomous"],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        m_submit.assert_called_once()
+        m_notify.assert_called_once()
+        m_resume.assert_not_called()
+
+    def test_explicit_mode_overrides_config(
+        self, runner: CliRunner, db_path: Path, project_dir: Path
+    ):
+        cfg_file = project_dir / ".squad" / "config.yaml"
+        cfg_file.parent.mkdir(parents=True)
+        cfg_file.write_text("mode: approval\n")
+
+        with (
+            patch("squad.cli.get_global_db_path", return_value=db_path),
+            patch("squad.cli.run_pipeline", side_effect=_land_in_review),
+            patch(
+                "squad.cli.submit_session_to_forge",
+                return_value=SubmitOutcome(plans_sent=1, queue_started=True),
+            ),
+            patch("squad.cli.notify_queued"),
+        ):
+            result = runner.invoke(
+                cli,
+                ["run", str(project_dir), "idea", "--mode", "autonomous"],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        sess = list_active_sessions(db_path=db_path)[0]
+        assert sess.mode == "autonomous"
+
+    def test_approval_uses_config_mode_when_flag_omitted(
+        self, runner: CliRunner, db_path: Path, project_dir: Path
+    ):
+        cfg_file = project_dir / ".squad" / "config.yaml"
+        cfg_file.parent.mkdir(parents=True)
+        cfg_file.write_text("mode: autonomous\n")
+
+        with (
+            patch("squad.cli.get_global_db_path", return_value=db_path),
+            patch("squad.cli.run_pipeline", side_effect=_land_in_review),
+            patch(
+                "squad.cli.submit_session_to_forge",
+                return_value=SubmitOutcome(plans_sent=1, queue_started=True),
+            ),
+            patch("squad.cli.notify_queued"),
+        ):
+            runner.invoke(cli, ["run", str(project_dir), "idea"], catch_exceptions=False)
+        sess = list_active_sessions(db_path=db_path)[0]
+        assert sess.mode == "autonomous"
+
+    def test_pipeline_error_surfaces(self, runner: CliRunner, db_path: Path, project_dir: Path):
+        from squad.pipeline import PipelineError
+
+        with (
+            patch("squad.cli.get_global_db_path", return_value=db_path),
+            patch("squad.cli.run_pipeline", side_effect=PipelineError("kaboom")),
+        ):
+            result = runner.invoke(cli, ["run", str(project_dir), "idea"], catch_exceptions=False)
+        assert result.exit_code != 0
+        assert "kaboom" in result.output or "Pipeline failed" in result.output
+
+    def test_forge_failure_during_run_falls_back(
+        self, runner: CliRunner, db_path: Path, project_dir: Path
+    ):
+        with (
+            patch("squad.cli.get_global_db_path", return_value=db_path),
+            patch("squad.cli.run_pipeline", side_effect=_land_in_review),
+            patch(
+                "squad.cli.submit_session_to_forge",
+                side_effect=ForgeUnavailable("offline"),
+            ),
+            patch("squad.cli.notify_fallback_review") as m_fallback,
+        ):
+            result = runner.invoke(
+                cli,
+                ["run", str(project_dir), "idea"],
+                input="y\n",
+                catch_exceptions=False,
+            )
+        assert result.exit_code != 0
+        m_fallback.assert_called_once()
+        from squad.db import get_session as _get
+
+        sess = list_active_sessions(db_path=db_path)[0]
+        # Reverted to review on Forge failure
+        assert _get(sess.id, db_path=db_path).status == "review"
+
+    def test_empty_answer_aborts(self, runner: CliRunner, db_path: Path, project_dir: Path):
+        with (
+            patch("squad.cli.get_global_db_path", return_value=db_path),
+            patch("squad.cli.run_pipeline", side_effect=_pause_with_question),
+        ):
+            result = runner.invoke(
+                cli,
+                ["run", str(project_dir), "idea"],
+                input="\n",  # empty answer
+                catch_exceptions=False,
+            )
+        assert result.exit_code != 0
+        assert "Empty answer" in result.output
