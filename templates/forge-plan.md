@@ -26,9 +26,10 @@ Describe the work. Reference files that exist in the project when relevant.
 Keep commits atomic and scoped to this lot only.
 
 **Success criteria**:
-- ...
+- Testable criterion 1
+- Testable criterion 2
 
-**Files**: `...`
+**Files**: `path/to/file3.py`, `tests/test_file3.py`
 
 **Depends on**: LOT 1
 

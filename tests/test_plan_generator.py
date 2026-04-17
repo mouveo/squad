@@ -16,10 +16,12 @@ from squad.db import (
 )
 from squad.forge_format import ForgeFormatError
 from squad.plan_generator import (
+    TEMPLATE_PATH,
     build_plan_prompt,
     copy_plans_to_project,
     generate_plans,
     generate_plans_from_session,
+    load_plan_template,
 )
 from squad.workspace import create_workspace, list_plans
 
@@ -54,7 +56,11 @@ def session(db_path: Path, project_dir: Path, tmp_path: Path):
 
 
 def _lot(n: int) -> str:
-    return f"## LOT {n} — Title {n}\n\nBody for lot {n}.\n\n**Files**: `file_{n}.py`\n"
+    return (
+        f"## LOT {n} — Title {n}\n\nBody for lot {n}.\n\n"
+        f"**Success criteria**:\n- works\n\n"
+        f"**Files**: `file_{n}.py`\n"
+    )
 
 
 def _valid_plan(n_lots: int = 6) -> str:
@@ -96,6 +102,42 @@ class TestBuildPlanPrompt:
             unresolved_blockers=[],
         )
         assert "(none)" in prompt
+
+    def test_embeds_repo_template(self):
+        """Prompt must reuse the repo-local template, not a duplicated literal."""
+        prompt = build_plan_prompt(
+            project_name="p",
+            project_path="/tmp/p",
+            idea="idea",
+            decision_summary="",
+            plan_inputs=[],
+            open_questions=[],
+            unresolved_blockers=[],
+        )
+        template = load_plan_template()
+        # A distinctive phrase from the template must appear in the prompt.
+        marker = "Format rules for generated plans"
+        assert marker in template
+        assert marker in prompt
+
+
+# ── load_plan_template ─────────────────────────────────────────────────────────
+
+
+class TestLoadPlanTemplate:
+    def test_template_path_exists(self):
+        assert TEMPLATE_PATH.exists()
+
+    def test_default_template_describes_format(self):
+        body = load_plan_template()
+        assert "## LOT 1" in body
+        assert "**Success criteria**:" in body
+        assert "**Files**:" in body
+
+    def test_custom_path(self, tmp_path: Path):
+        custom = tmp_path / "tpl.md"
+        custom.write_text("CUSTOM TEMPLATE BODY")
+        assert load_plan_template(custom) == "CUSTOM TEMPLATE BODY"
 
 
 # ── generate_plans ─────────────────────────────────────────────────────────────

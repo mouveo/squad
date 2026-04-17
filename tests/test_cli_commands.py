@@ -406,7 +406,8 @@ class TestReviewCommand:
     def test_edit_valid_persists_changes(self, runner, db_path, project_dir):
         session = _prepare_session_with_plans(runner, db_path, project_dir)
         valid_plan = "# proj — Plan 1/1: t\n\n> d\n> Prérequis : aucun.\n\n---\n\n" + "\n\n".join(
-            f"## LOT {i} — t\n\nbody\n\n**Files**: `f.py`" for i in range(1, 6)
+            f"## LOT {i} — t\n\nbody\n\n**Success criteria**:\n- ok\n\n**Files**: `f.py`"
+            for i in range(1, 6)
         )
         with (
             patch("squad.cli.get_global_db_path", return_value=db_path),
