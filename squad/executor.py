@@ -123,22 +123,32 @@ def _extract_text(ndjson_output: str) -> str:
 
 def _call_claude_cli(cmd: list[str], timeout: int) -> subprocess.CompletedProcess:
     """Run the Claude CLI subprocess. Isolated here to allow mocking in tests."""
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        stdin=subprocess.DEVNULL,  # claude --print waits on stdin by default
+    )
 
 
 def _build_cmd(prompt: str, allowed_tools: list[str], model: str = _MODEL) -> list[str]:
+    # Claude CLI takes the prompt as a positional arg: `claude [options] [prompt]`
+    # `--output-format stream-json` also requires `--verbose`.
     cmd = [
         "claude",
         "--print",
+        "--verbose",
         "--output-format",
         "stream-json",
         "--model",
         model,
-        "--prompt",
-        prompt,
     ]
     if allowed_tools:
-        cmd.extend(["--allowedTools", ",".join(allowed_tools)])
+        # Use --allowedTools=<list> form (with =) to avoid the CLI parser
+        # greedily consuming the following prompt token as a tool name.
+        cmd.append(f"--allowedTools={','.join(allowed_tools)}")
+    cmd.append(prompt)
     return cmd
 
 
