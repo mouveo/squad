@@ -103,7 +103,14 @@ def build_agent_prompt(
 
 
 def _extract_text(ndjson_output: str) -> str:
-    """Concatenate all 'type: text' payloads from a Claude CLI NDJSON stream."""
+    """Concatenate all assistant text blocks from a Claude CLI stream-json output.
+
+    Stream-json lines have one of several shapes depending on the CLI version.
+    Modern CLI (2.x) emits assistant messages as:
+        {"type":"assistant","message":{"content":[{"type":"text","text":"..."}, ...]}}
+    Older versions emitted top-level {"type":"text","text":"..."} deltas.
+    This extractor handles both.
+    """
     texts: list[str] = []
     for line in ndjson_output.splitlines():
         line = line.strip()
@@ -111,10 +118,20 @@ def _extract_text(ndjson_output: str) -> str:
             continue
         try:
             obj = json.loads(line)
-            if obj.get("type") == "text":
-                texts.append(obj.get("text", ""))
         except json.JSONDecodeError:
             continue
+
+        # New shape: assistant message with nested content blocks
+        if obj.get("type") == "assistant":
+            message = obj.get("message", {})
+            for block in message.get("content", []) or []:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    texts.append(block.get("text", ""))
+            continue
+
+        # Old shape: top-level text event
+        if obj.get("type") == "text":
+            texts.append(obj.get("text", ""))
     return "".join(texts)
 
 
