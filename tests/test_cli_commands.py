@@ -12,6 +12,15 @@ from squad.db import ensure_schema, list_active_sessions
 # ── fixtures ───────────────────────────────────────────────────────────────────
 
 
+@pytest.fixture(autouse=True)
+def _isolated_squad_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Redirect Path.home() so squad.config never reads the user's real ~/.squad."""
+    home = tmp_path / "_home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
 @pytest.fixture
 def db_path(tmp_path: Path) -> Path:
     path = tmp_path / ".squad" / "squad.db"
@@ -565,3 +574,92 @@ class TestAutonomousStartDispatch:
                 catch_exceptions=False,
             )
         m_submit.assert_not_called()
+
+
+# ── squad init (LOT 1 — Plan 3) ────────────────────────────────────────────────
+
+
+class TestInitCommand:
+    def test_creates_global_config(self, runner: CliRunner, _isolated_squad_home: Path):
+        result = runner.invoke(cli, ["init"], catch_exceptions=False)
+        assert result.exit_code == 0
+        assert (_isolated_squad_home / ".squad" / "config.yaml").exists()
+        assert "Wrote default config" in result.output
+
+    def test_idempotent_no_overwrite(self, runner: CliRunner, _isolated_squad_home: Path):
+        runner.invoke(cli, ["init"], catch_exceptions=False)
+        cfg_file = _isolated_squad_home / ".squad" / "config.yaml"
+        cfg_file.write_text("custom: yes\n")
+        result = runner.invoke(cli, ["init"], catch_exceptions=False)
+        assert result.exit_code == 0
+        assert "already exists" in result.output
+        assert cfg_file.read_text() == "custom: yes\n"
+
+    def test_force_overwrites(self, runner: CliRunner, _isolated_squad_home: Path):
+        runner.invoke(cli, ["init"], catch_exceptions=False)
+        cfg_file = _isolated_squad_home / ".squad" / "config.yaml"
+        cfg_file.write_text("custom: yes\n")
+        result = runner.invoke(cli, ["init", "--force"], catch_exceptions=False)
+        assert result.exit_code == 0
+        assert "custom" not in cfg_file.read_text()
+        assert "mode: approval" in cfg_file.read_text()
+
+    def test_project_target(
+        self,
+        runner: CliRunner,
+        _isolated_squad_home: Path,
+        project_dir: Path,
+    ):
+        result = runner.invoke(cli, ["init", "--project", str(project_dir)], catch_exceptions=False)
+        assert result.exit_code == 0
+        assert (project_dir / ".squad" / "config.yaml").exists()
+        assert not (_isolated_squad_home / ".squad" / "config.yaml").exists()
+
+
+# ── start: config-driven --mode (LOT 1 — Plan 3) ──────────────────────────────
+
+
+class TestStartUsesConfigMode:
+    def test_project_config_mode_when_flag_omitted(
+        self, runner: CliRunner, db_path: Path, project_dir: Path
+    ):
+        cfg_file = project_dir / ".squad" / "config.yaml"
+        cfg_file.parent.mkdir(parents=True)
+        cfg_file.write_text("mode: autonomous\n")
+
+        result = _run(runner, db_path, "start", str(project_dir), "an idea")
+        assert result.exit_code == 0
+        sessions = list_active_sessions(db_path=db_path)
+        assert sessions[0].mode == "autonomous"
+
+    def test_explicit_flag_wins_over_config(
+        self, runner: CliRunner, db_path: Path, project_dir: Path
+    ):
+        cfg_file = project_dir / ".squad" / "config.yaml"
+        cfg_file.parent.mkdir(parents=True)
+        cfg_file.write_text("mode: autonomous\n")
+
+        result = _run(runner, db_path, "start", str(project_dir), "an idea", "--mode", "approval")
+        assert result.exit_code == 0
+        sessions = list_active_sessions(db_path=db_path)
+        assert sessions[0].mode == "approval"
+
+    def test_defaults_to_approval_without_config(
+        self, runner: CliRunner, db_path: Path, project_dir: Path
+    ):
+        result = _run(runner, db_path, "start", str(project_dir), "an idea")
+        assert result.exit_code == 0
+        sessions = list_active_sessions(db_path=db_path)
+        assert sessions[0].mode == "approval"
+
+    def test_invalid_config_mode_falls_back_to_approval(
+        self, runner: CliRunner, db_path: Path, project_dir: Path
+    ):
+        cfg_file = project_dir / ".squad" / "config.yaml"
+        cfg_file.parent.mkdir(parents=True)
+        cfg_file.write_text("mode: bogus\n")
+
+        result = _run(runner, db_path, "start", str(project_dir), "an idea")
+        assert result.exit_code == 0
+        sessions = list_active_sessions(db_path=db_path)
+        assert sessions[0].mode == "approval"

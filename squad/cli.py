@@ -6,9 +6,18 @@ from pathlib import Path
 import click
 
 from squad import __version__
-from squad.config import get_global_db_path, get_project_state_dir
+from squad.config import (
+    get_config_value,
+    get_global_config_path,
+    get_global_db_path,
+    get_project_config_path,
+    get_project_state_dir,
+    write_default_config,
+)
 from squad.constants import (
+    MODE_APPROVAL,
     MODE_AUTONOMOUS,
+    SESSION_MODES,
     STATUS_APPROVED,
     STATUS_FAILED,
     STATUS_REVIEW,
@@ -52,6 +61,19 @@ def _derive_title(idea: str, max_len: int = 60) -> str:
     return idea[:max_len].rstrip() + "…"
 
 
+def _resolve_mode(project_path: str | None) -> str:
+    """Return the execution mode from config, defaulting to approval.
+
+    Used when no explicit ``--mode`` flag is given on the CLI; an
+    unrecognised value in the config is silently ignored so a typo cannot
+    block a session.
+    """
+    cfg_mode = get_config_value("mode", project_path=project_path)
+    if cfg_mode in SESSION_MODES:
+        return cfg_mode
+    return MODE_APPROVAL
+
+
 @click.group()
 def cli() -> None:
     """Squad — AI product squad that turns ideas into Forge-executable plans."""
@@ -64,19 +86,50 @@ def version() -> None:
 
 
 @cli.command()
+@click.option(
+    "--project",
+    "project_path",
+    type=click.Path(exists=True, file_okay=False),
+    default=None,
+    help="Initialise a project-level config at {PROJECT}/.squad/config.yaml.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Overwrite an existing config file.",
+)
+def init(project_path: str | None, force: bool) -> None:
+    """Write a default Squad config (global, or per project)."""
+    target = (
+        get_project_config_path(project_path)
+        if project_path is not None
+        else get_global_config_path()
+    )
+    if write_default_config(target, force=force):
+        click.echo(f"Wrote default config to {target}")
+    else:
+        click.echo(f"Config already exists at {target} (use --force to overwrite).")
+
+
+@cli.command()
 @click.argument("project_path", type=click.Path(exists=True, file_okay=False))
 @click.argument("idea")
 @click.option(
     "--mode",
-    type=click.Choice(["approval", "autonomous"]),
-    default="approval",
-    show_default=True,
-    help="Execution mode: wait for user approval or run fully autonomous.",
+    type=click.Choice(SESSION_MODES),
+    default=None,
+    help=(
+        "Execution mode: wait for user approval or run fully autonomous. "
+        "Falls back to the configured `mode` (default: approval) when omitted."
+    ),
 )
-def start(project_path: str, idea: str, mode: str) -> None:
+def start(project_path: str, idea: str, mode: str | None) -> None:
     """Start a new Squad session for PROJECT_PATH with IDEA."""
     db_path = get_global_db_path()
     ensure_schema(db_path)
+
+    if mode is None:
+        mode = _resolve_mode(project_path)
 
     session_id = str(uuid.uuid4())
     workspace_path = get_project_state_dir(project_path) / "sessions" / session_id
