@@ -39,6 +39,15 @@ _PROMPT_TIMEOUT = 600
 # Characters reserved per prompt section
 _MAX_SECTION_CHARS = 4_000
 
+# Repo-local Forge plan template — single source of truth for the format
+# shown to Claude. Validation rules live in ``squad.forge_format``.
+TEMPLATE_PATH: Path = Path(__file__).resolve().parent.parent / "templates" / "forge-plan.md"
+
+
+def load_plan_template(path: Path | None = None) -> str:
+    """Return the Forge plan template body used in the generation prompt."""
+    return (path or TEMPLATE_PATH).read_text(encoding="utf-8")
+
 
 @dataclass
 class GeneratedPlanDraft:
@@ -75,6 +84,7 @@ def build_plan_prompt(
     questions_bullets = "\n".join(f"- {q}" for q in open_questions) or "(none)"
     blockers_bullets = "\n".join(f"- {b}" for b in unresolved_blockers) or "(none)"
     context_block = _truncate(project_context.strip(), _MAX_SECTION_CHARS)
+    template = _truncate(load_plan_template(), _MAX_SECTION_CHARS)
 
     return (
         "You are producing a Forge-executable plan from a PM synthesis.\n\n"
@@ -85,26 +95,15 @@ def build_plan_prompt(
         f"## Plan inputs\n{inputs_bullets}\n\n"
         f"## Open questions (already resolved)\n{questions_bullets}\n\n"
         f"## Unresolved blockers (must be accounted for)\n{blockers_bullets}\n\n"
-        "## Output format (strict)\n"
-        "Return a single markdown document with this shape:\n\n"
-        "```\n"
-        f"# {project_name} — Plan 1/1: {{Plan title}}\n\n"
-        "> Short description of this plan's scope.\n"
-        "> Prérequis : aucun.\n\n"
-        "---\n\n"
-        "## LOT 1 — {{Lot title}}\n\n"
-        "Description paragraph(s).\n\n"
-        "**Success criteria**:\n"
-        "- criterion 1\n"
-        "- criterion 2\n\n"
-        "**Files**: `path/to/file1.py`, `path/to/file2.py`\n\n"
-        "---\n\n"
-        "## LOT 2 — ...\n"
-        "```\n\n"
+        "## Output format\n"
+        "Use exactly the structure of this template. Replace placeholders "
+        f"(`{{Project name}}`, `{{Plan title}}`, `{{Lot title}}`, ...) with "
+        f"real values for `{project_name}`. Keep section headings verbatim.\n\n"
+        f"```markdown\n{template}\n```\n\n"
         "Constraints:\n"
         "- Between 5 and 15 lots.\n"
         "- Lots numbered sequentially starting at 1.\n"
-        "- Each lot must include a `**Files**:` line.\n"
+        "- Each lot must include a `**Success criteria**:` bullet list and a `**Files**:` line.\n"
         "- Lots must be concrete and match the target project's stack.\n"
         "- Address every unresolved blocker explicitly in one or more lots.\n"
         "- Output the markdown directly — do not wrap the whole response in a code fence."

@@ -10,8 +10,9 @@ Rules enforced here:
 * The document must start with a top-level ``#`` heading.
 * Each plan must contain between ``MIN_LOTS`` (5) and ``MAX_LOTS`` (15) lots.
 * Lots are numbered starting at 1 and must be sequential with no gaps.
-* Each lot body must mention a ``**Files**:`` line (no specific shape
-  otherwise — free-form prose is allowed).
+* Each lot body must mention a ``**Success criteria**:`` line and a
+  ``**Files**:`` line (no specific shape otherwise — free-form prose is
+  allowed).
 * When a draft exceeds ``MAX_LOTS``, ``split_plan`` cuts it into several
   plans of up to ``MAX_LOTS`` lots each, re-numbering each part from 1
   and renaming the ``# ...`` header as ``Plan N/M``.
@@ -32,6 +33,7 @@ _HARD_MAX_LOTS = 100
 _HEADER_RE = re.compile(r"^#\s+.+$", re.MULTILINE)
 _LOT_HEADING_RE = re.compile(r"^##\s+LOT\s+(\d+)\s+—\s+(.+?)\s*$", re.MULTILINE)
 _FILES_LINE_RE = re.compile(r"^\*\*Files\*\*:\s*.+$", re.MULTILINE)
+_SUCCESS_LINE_RE = re.compile(r"^\*\*Success\s+criteria\*\*:", re.MULTILINE)
 
 
 # ── dataclasses ────────────────────────────────────────────────────────────────
@@ -122,6 +124,8 @@ def _check_bounds(lots: list[Lot]) -> list[str]:
 def _check_lot_bodies(lots: list[Lot]) -> list[str]:
     errors: list[str] = []
     for lot in lots:
+        if not _SUCCESS_LINE_RE.search(lot.body):
+            errors.append(f"LOT {lot.number} is missing a '**Success criteria**:' section")
         if not _FILES_LINE_RE.search(lot.body):
             errors.append(f"LOT {lot.number} is missing a '**Files**:' line")
     return errors

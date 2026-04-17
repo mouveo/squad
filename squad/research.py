@@ -44,6 +44,15 @@ logger = logging.getLogger(__name__)
 # strings directly into Claude CLI ``--allowedTools`` identifiers.
 RESEARCH_TOOLS: tuple[str, ...] = ("Read", "WebSearch", "WebFetch")
 
+# Repo-local source of truth for the deep-research skill protocol. The
+# user-side install (`scripts/install-skills.sh`) syncs the same file to
+# the Claude CLI skills directory; we still load the repo copy here so
+# the benchmark stays deterministic and testable when the skill is not
+# installed globally.
+REPO_SKILL_PATH: Path = (
+    Path(__file__).resolve().parent.parent / "skills" / "deep-research" / "SKILL.md"
+)
+
 
 # ── budget ─────────────────────────────────────────────────────────────────────
 
@@ -125,6 +134,29 @@ def prepare_research_axes(subject_type: str | None, depth: str) -> list[str]:
     return axes
 
 
+# ── skill loading ──────────────────────────────────────────────────────────────
+
+
+def load_research_skill(path: Path | None = None) -> str | None:
+    """Return the deep-research skill body, or ``None`` when unavailable.
+
+    Reads ``REPO_SKILL_PATH`` by default (the repo-local copy), strips
+    any leading YAML frontmatter so only the protocol body is injected
+    into the research prompt. Returning ``None`` when the file is missing
+    lets the caller fall back to the bare prompt without crashing.
+    """
+    target = path or REPO_SKILL_PATH
+    if not target.exists():
+        return None
+    text = target.read_text(encoding="utf-8")
+    if text.startswith("---\n"):
+        end = text.find("\n---", 4)
+        if end != -1:
+            text = text[end + len("\n---") :].lstrip("\n")
+    text = text.strip()
+    return text or None
+
+
 # ── prompt ─────────────────────────────────────────────────────────────────────
 
 
@@ -133,16 +165,18 @@ def build_research_prompt(
     axes: list[str],
     budget: ResearchBudget,
     extra_context: str | None = None,
+    protocol: str | None = None,
 ) -> str:
     """Build the single research prompt sent to Claude.
 
     The prompt is capped at ``budget.max_prompt_chars`` by truncating
-    ``extra_context`` first, then the idea text if necessary. The
-    structure of the requested output is fixed so downstream
-    summarisation in the context builder can rely on it.
+    ``extra_context`` first, then the protocol, then the full prompt as
+    a last resort. The structure of the requested output is fixed so
+    downstream summarisation in the context builder can rely on it.
     """
     axes_block = "\n".join(f"{idx + 1}. {axis}" for idx, axis in enumerate(axes))
     context_block = (extra_context or "").strip()
+    protocol_block = (protocol or "").strip()
 
     header = (
         "You are the Research/Benchmark agent in a multi-agent design "
@@ -170,26 +204,31 @@ def build_research_prompt(
         "- Use the tools provided (Read, WebSearch, WebFetch) only when relevant.\n"
     )
 
-    if context_block:
-        context_section = f"## Additional context\n{context_block}\n\n"
-    else:
-        context_section = ""
+    def _assemble(ctx: str, proto: str) -> str:
+        protocol_section = f"## Research protocol\n{proto}\n\n" if proto else ""
+        context_section = f"## Additional context\n{ctx}\n\n" if ctx else ""
+        return header + protocol_section + context_section + body
 
-    # Assemble and cap
-    prompt = header + context_section + body
+    prompt = _assemble(context_block, protocol_block)
     if len(prompt) <= budget.max_prompt_chars:
         return prompt
 
-    # Truncate the additional context first
-    overflow = len(prompt) - budget.max_prompt_chars
-    if context_block and overflow > 0:
+    # 1. Trim the additional context first.
+    if context_block:
+        overflow = len(prompt) - budget.max_prompt_chars
         keep = max(0, len(context_block) - overflow - 40)
-        truncated_ctx = context_block[:keep] + "\n…[context truncated]"
-        context_section = f"## Additional context\n{truncated_ctx}\n\n"
-        prompt = header + context_section + body
+        context_block = context_block[:keep] + "\n…[context truncated]"
+        prompt = _assemble(context_block, protocol_block)
 
+    # 2. Then trim the protocol section if still over.
+    if len(prompt) > budget.max_prompt_chars and protocol_block:
+        overflow = len(prompt) - budget.max_prompt_chars
+        keep = max(0, len(protocol_block) - overflow - 40)
+        protocol_block = protocol_block[:keep] + "\n…[protocol truncated]"
+        prompt = _assemble(context_block, protocol_block)
+
+    # 3. Last resort: hard truncate the assembled prompt.
     if len(prompt) > budget.max_prompt_chars:
-        # Last resort: hard truncation of the full prompt
         prompt = prompt[: budget.max_prompt_chars - 40] + "\n…[prompt truncated]"
     return prompt
 
@@ -284,11 +323,13 @@ def run_research(
 
     budget = budget_for_depth(session.research_depth)
     axes = prepare_research_axes(session.subject_type, session.research_depth)
+    protocol = load_research_skill()
     prompt = build_research_prompt(
         idea=session.idea,
         axes=axes,
         budget=budget,
         extra_context=extra_context,
+        protocol=protocol,
     )
 
     logger.info(

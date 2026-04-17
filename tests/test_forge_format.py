@@ -14,8 +14,10 @@ from squad.forge_format import (
 )
 
 
-def _lot(n: int, with_files: bool = True) -> str:
-    body = f"## LOT {n} — Title {n}\n\nBody for lot {n}.\n\n**Success criteria**:\n- does X\n"
+def _lot(n: int, with_files: bool = True, with_success: bool = True) -> str:
+    body = f"## LOT {n} — Title {n}\n\nBody for lot {n}.\n"
+    if with_success:
+        body += "\n**Success criteria**:\n- does X\n"
     if with_files:
         body += f"\n**Files**: `file_{n}.py`\n"
     return body
@@ -114,6 +116,14 @@ class TestValidatePlan:
         result = validate_plan(plan)
         assert not result.valid
         assert any("Files" in e for e in result.errors)
+
+    def test_missing_success_criteria(self):
+        # LOT 2 has no Success criteria section
+        parts = [_lot(i, with_success=(i != 2)) for i in range(1, 6)]
+        plan = "# X\n\n" + "\n\n".join(parts)
+        result = validate_plan(plan)
+        assert not result.valid
+        assert any("Success criteria" in e for e in result.errors)
 
     def test_duplicate_lot_numbers(self):
         plan = (

@@ -117,7 +117,20 @@ Squad produit des plans markdown au format Forge (`## LOT N — Titre`). Ces pla
 2. Envoyés via `forge queue add {project} {plan.md}`
 3. Exécutés via `forge queue run {project}`
 
-Le format Forge est décrit dans les templates (`templates/forge-plan.md`) et validé par `forge_format.py`.
+Le format Forge est décrit dans le template (`templates/forge-plan.md`), chargé par `plan_generator.py` et validé par `forge_format.py` (lots numérotés 5–15, `**Success criteria**:` + `**Files**:` obligatoires).
+
+## Configuration utilisateur
+
+- Global : `~/.squad/config.yaml` (créé par `squad init`).
+- Projet : `{projet}/.squad/config.yaml` (créé par `squad init --project <projet>`), deep-merged sur le global.
+- Variables `${VAR}` résolues à la lecture (`squad/config.py:load_config`).
+- Le défaut est défini dans `DEFAULT_CONFIG_YAML` ; les helpers `load_config` / `get_config_value` sont les seuls points d'entrée.
+
+## Skills Claude Code
+
+Le skill canonique vit dans `skills/deep-research/SKILL.md`. Il est :
+- chargé par `squad/research.py` (`load_research_skill`) et injecté dans le prompt benchmark ;
+- installable côté utilisateur via `scripts/install-skills.sh` (cible `~/.claude/skills` par défaut, idempotent).
 
 ## Points d'attention
 

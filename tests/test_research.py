@@ -20,6 +20,7 @@ from squad.models import (
 from squad.research import (
     DEEP_BUDGET,
     NORMAL_BUDGET,
+    REPO_SKILL_PATH,
     RESEARCH_TOOLS,
     BenchmarkReport,
     ResearchBudget,
@@ -27,6 +28,7 @@ from squad.research import (
     _truncate_output,
     budget_for_depth,
     build_research_prompt,
+    load_research_skill,
     persist_benchmark,
     prepare_research_axes,
     run_research,
@@ -311,6 +313,109 @@ class TestRunResearch:
             report = run_research(session.id, slug="custom", db_path=db_path)
         assert report.slug == "custom"
         assert "benchmark-custom.md" in report.file_path.name
+
+
+# ── load_research_skill ────────────────────────────────────────────────────────
+
+
+class TestLoadResearchSkill:
+    def test_loads_repo_local_skill_by_default(self):
+        """The repo-local SKILL.md is the canonical fallback."""
+        body = load_research_skill()
+        assert body is not None
+        assert "Deep Research Protocol" in body or "Protocole" in body
+
+    def test_strips_yaml_frontmatter(self, tmp_path: Path):
+        skill = tmp_path / "SKILL.md"
+        skill.write_text(
+            "---\nname: test\ndescription: x\n---\n\n# Body\nProtocol text.\n",
+            encoding="utf-8",
+        )
+        body = load_research_skill(skill)
+        assert body is not None
+        assert "name: test" not in body
+        assert body.startswith("# Body")
+
+    def test_returns_none_when_missing(self, tmp_path: Path):
+        assert load_research_skill(tmp_path / "absent.md") is None
+
+    def test_returns_none_when_empty(self, tmp_path: Path):
+        empty = tmp_path / "SKILL.md"
+        empty.write_text("---\nname: x\ndescription: y\n---\n\n", encoding="utf-8")
+        assert load_research_skill(empty) is None
+
+    def test_no_frontmatter_returns_full_body(self, tmp_path: Path):
+        skill = tmp_path / "SKILL.md"
+        skill.write_text("Just a body.\n", encoding="utf-8")
+        assert load_research_skill(skill) == "Just a body."
+
+    def test_repo_skill_path_points_to_existing_file(self):
+        """LOT 2 ships the canonical skill at this path — guard against drift."""
+        assert REPO_SKILL_PATH.exists()
+
+
+# ── build_research_prompt with protocol ───────────────────────────────────────
+
+
+class TestBuildResearchPromptWithProtocol:
+    def test_protocol_section_injected(self):
+        prompt = build_research_prompt(
+            "idea",
+            ["a"],
+            NORMAL_BUDGET,
+            protocol="STEP 1: cadrer.",
+        )
+        assert "## Research protocol" in prompt
+        assert "STEP 1: cadrer." in prompt
+
+    def test_no_section_when_protocol_missing(self):
+        prompt = build_research_prompt("idea", ["a"], NORMAL_BUDGET, protocol=None)
+        assert "## Research protocol" not in prompt
+
+    def test_budget_respected_with_large_protocol(self):
+        big_protocol = "p" * 50_000
+        prompt = build_research_prompt(
+            "idea",
+            ["a"],
+            NORMAL_BUDGET,
+            protocol=big_protocol,
+        )
+        assert len(prompt) <= NORMAL_BUDGET.max_prompt_chars
+
+    def test_context_truncated_before_protocol(self):
+        ctx = "c" * 50_000
+        proto = "PROTOCOL_MARK"
+        prompt = build_research_prompt(
+            "idea",
+            ["a"],
+            NORMAL_BUDGET,
+            extra_context=ctx,
+            protocol=proto,
+        )
+        assert "PROTOCOL_MARK" in prompt
+        assert "context truncated" in prompt.lower()
+
+
+# ── run_research integrates skill protocol ────────────────────────────────────
+
+
+class TestRunResearchUsesSkill:
+    def test_protocol_injected_into_prompt(self, session, db_path):
+        with patch("squad.research.run_task_text", return_value="# Benchmark") as m:
+            run_research(session.id, db_path=db_path)
+        prompt_arg = m.call_args.args[0]
+        assert "## Research protocol" in prompt_arg
+
+    def test_falls_back_when_skill_missing(self, session, db_path, tmp_path):
+        with (
+            patch("squad.research.REPO_SKILL_PATH", tmp_path / "missing.md"),
+            patch("squad.research.run_task_text", return_value="# Benchmark") as m,
+        ):
+            run_research(session.id, db_path=db_path)
+        prompt_arg = m.call_args.args[0]
+        assert "## Research protocol" not in prompt_arg
+        # The benchmark still runs and produces a report.
+        assert m.call_count == 1
 
 
 # ── integration marker ─────────────────────────────────────────────────────────
