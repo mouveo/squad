@@ -1,5 +1,6 @@
 """Global session registry — SQLite CRUD via sqlite-utils."""
 
+import json
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -12,6 +13,16 @@ from squad.models import GeneratedPlan, PhaseOutput, Question, Session
 
 # Statuses that mean a session is no longer in progress
 _TERMINAL_STATUSES = (STATUS_DONE, STATUS_FAILED)
+
+
+def _decode_json(value: str | None, default):
+    if not value:
+        return default
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed is not None else default
 
 
 # ── private helpers ────────────────────────────────────────────────────────────
@@ -43,6 +54,12 @@ def _to_session(row: dict) -> Session:
         current_phase=row.get("current_phase"),
         created_at=_dt(row.get("created_at")) or datetime.utcnow(),
         updated_at=_dt(row.get("updated_at")) or datetime.utcnow(),
+        subject_type=row.get("subject_type"),
+        research_depth=row.get("research_depth"),
+        agents_by_phase=_decode_json(row.get("agents_by_phase"), {}),
+        phase_attempts=_decode_json(row.get("phase_attempts"), {}),
+        challenge_retry_count=int(row.get("challenge_retry_count") or 0),
+        skipped_phases=_decode_json(row.get("skipped_phases"), {}),
     )
 
 
@@ -56,6 +73,7 @@ def _to_phase_output(row: dict) -> PhaseOutput:
         file_path=row["file_path"],
         duration_seconds=row.get("duration_seconds"),
         tokens_used=row.get("tokens_used"),
+        attempt=int(row.get("attempt") or 1),
         created_at=_dt(row.get("created_at")) or datetime.utcnow(),
     )
 
@@ -104,14 +122,35 @@ def ensure_schema(db_path: Path | None = None) -> None:
             "current_phase": str,
             "created_at": str,
             "updated_at": str,
+            # Profile columns (LOT 2)
+            "subject_type": str,
+            "research_depth": str,
+            "agents_by_phase": str,
+            "phase_attempts": str,
+            "challenge_retry_count": int,
+            "skipped_phases": str,
         },
         pk="id",
         not_null={"title", "project_path", "workspace_path", "idea", "status"},
-        defaults={"mode": MODE_APPROVAL},
+        defaults={"mode": MODE_APPROVAL, "challenge_retry_count": 0},
         if_not_exists=True,
     )
     db["sessions"].create_index(["status"], if_not_exists=True)
     db["sessions"].create_index(["project_path"], if_not_exists=True)
+
+    # Additive migration for DBs created before LOT 2
+    session_cols = set(db["sessions"].columns_dict)
+    for col, col_type in (
+        ("subject_type", str),
+        ("research_depth", str),
+        ("agents_by_phase", str),
+        ("phase_attempts", str),
+        ("skipped_phases", str),
+    ):
+        if col not in session_cols:
+            db["sessions"].add_column(col, col_type)
+    if "challenge_retry_count" not in session_cols:
+        db["sessions"].add_column("challenge_retry_count", int, not_null_default=0)
 
     db["phase_outputs"].create(
         {
@@ -123,13 +162,18 @@ def ensure_schema(db_path: Path | None = None) -> None:
             "file_path": str,
             "duration_seconds": float,
             "tokens_used": int,
+            "attempt": int,
             "created_at": str,
         },
         pk="id",
         not_null={"session_id", "phase", "agent", "output", "file_path"},
+        defaults={"attempt": 1},
         if_not_exists=True,
     )
     db["phase_outputs"].create_index(["session_id"], if_not_exists=True)
+
+    if "attempt" not in db["phase_outputs"].columns_dict:
+        db["phase_outputs"].add_column("attempt", int, not_null_default=1)
 
     db["questions"].create(
         {
@@ -191,6 +235,12 @@ def create_session(
         "current_phase": None,
         "created_at": now,
         "updated_at": now,
+        "subject_type": None,
+        "research_depth": None,
+        "agents_by_phase": None,
+        "phase_attempts": None,
+        "challenge_retry_count": 0,
+        "skipped_phases": None,
     }
     db["sessions"].insert(row)
     return _to_session(row)
@@ -254,6 +304,106 @@ def list_session_history(
     return [_to_session(dict(r)) for r in rows]
 
 
+# ── session profile ────────────────────────────────────────────────────────────
+
+
+def update_session_profile(
+    session_id: str,
+    subject_type: str,
+    research_depth: str,
+    agents_by_phase: dict[str, list[str]],
+    db_path: Path | None = None,
+) -> None:
+    """Persist the deterministic subject profile on the session row.
+
+    Called once by ``squad.subject_detector`` at session start. The
+    pipeline reads these fields on start and resume without ever
+    reclassifying the subject.
+    """
+    db = _open(db_path)
+    db["sessions"].update(
+        session_id,
+        {
+            "subject_type": subject_type,
+            "research_depth": research_depth,
+            "agents_by_phase": json.dumps(agents_by_phase, ensure_ascii=False),
+            "updated_at": _now(),
+        },
+    )
+
+
+def mark_phase_skipped(
+    session_id: str,
+    phase: str,
+    reason: str,
+    db_path: Path | None = None,
+) -> None:
+    """Mark a phase as skipped with a persisted reason."""
+    db = _open(db_path)
+    row = db["sessions"].get(session_id)
+    current = _decode_json(dict(row).get("skipped_phases"), {})
+    current[phase] = reason
+    db["sessions"].update(
+        session_id,
+        {
+            "skipped_phases": json.dumps(current, ensure_ascii=False),
+            "updated_at": _now(),
+        },
+    )
+
+
+def increment_phase_attempt(
+    session_id: str,
+    phase: str,
+    db_path: Path | None = None,
+) -> int:
+    """Increment the attempt counter for a phase and return the new value."""
+    db = _open(db_path)
+    row = db["sessions"].get(session_id)
+    attempts = _decode_json(dict(row).get("phase_attempts"), {})
+    new_value = int(attempts.get(phase, 0)) + 1
+    attempts[phase] = new_value
+    db["sessions"].update(
+        session_id,
+        {
+            "phase_attempts": json.dumps(attempts, ensure_ascii=False),
+            "updated_at": _now(),
+        },
+    )
+    return new_value
+
+
+def get_phase_attempt(
+    session_id: str,
+    phase: str,
+    db_path: Path | None = None,
+) -> int:
+    """Return the current attempt count for a phase (0 if never run)."""
+    db = _open(db_path)
+    row = db["sessions"].get(session_id)
+    attempts = _decode_json(dict(row).get("phase_attempts"), {})
+    return int(attempts.get(phase, 0))
+
+
+def increment_challenge_retry_count(
+    session_id: str,
+    db_path: Path | None = None,
+) -> int:
+    """Increment and return the challenge-driven retry counter."""
+    db = _open(db_path)
+    row = db["sessions"].get(session_id)
+    current = int(dict(row).get("challenge_retry_count") or 0)
+    new_value = current + 1
+    db["sessions"].update(
+        session_id,
+        {
+            "challenge_retry_count": new_value,
+            "updated_at": _now(),
+        },
+    )
+    return new_value
+
+
 # ── phase outputs ──────────────────────────────────────────────────────────────
 
 
@@ -265,9 +415,16 @@ def create_phase_output(
     file_path: str,
     duration_seconds: float | None = None,
     tokens_used: int | None = None,
+    attempt: int = 1,
     db_path: Path | None = None,
 ) -> PhaseOutput:
-    """Insert a phase output record and return it."""
+    """Insert a phase output record and return it.
+
+    ``attempt`` distinguishes the first run of a phase from later retries
+    (e.g. a second conception pass after challenge blockers). It lets the
+    context builder pull only the latest valid attempt when re-injecting
+    previous deliverables.
+    """
     db = _open(db_path)
     row = {
         "id": str(uuid.uuid4()),
@@ -278,6 +435,7 @@ def create_phase_output(
         "file_path": file_path,
         "duration_seconds": duration_seconds,
         "tokens_used": tokens_used,
+        "attempt": attempt,
         "created_at": _now(),
     }
     db["phase_outputs"].insert(row)
@@ -287,22 +445,24 @@ def create_phase_output(
 def list_phase_outputs(
     session_id: str,
     phase: str | None = None,
+    attempt: int | None = None,
     db_path: Path | None = None,
 ) -> list[PhaseOutput]:
-    """Return phase outputs for a session, optionally filtered by phase."""
+    """Return phase outputs for a session, optionally filtered by phase/attempt."""
     db = _open(db_path)
+    clauses = ["session_id = ?"]
+    params: list = [session_id]
     if phase:
-        rows = db["phase_outputs"].rows_where(
-            "session_id = ? AND phase = ?",
-            [session_id, phase],
-            order_by="created_at ASC",
-        )
-    else:
-        rows = db["phase_outputs"].rows_where(
-            "session_id = ?",
-            [session_id],
-            order_by="created_at ASC",
-        )
+        clauses.append("phase = ?")
+        params.append(phase)
+    if attempt is not None:
+        clauses.append("attempt = ?")
+        params.append(attempt)
+    rows = db["phase_outputs"].rows_where(
+        " AND ".join(clauses),
+        params,
+        order_by="created_at ASC",
+    )
     return [_to_phase_output(dict(r)) for r in rows]
 
 

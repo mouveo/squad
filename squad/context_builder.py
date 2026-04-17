@@ -1,21 +1,39 @@
 """Assembles cumulative prompt context from session state for phase injection.
 
-The context passed to each agent includes: the project idea, the project context
-(CLAUDE.md or a minimal stub), answered Q&A from the interviewing phase, and the
-text outputs from all phases that have completed before the current one.
+The context passed to each agent includes:
 
-Research/benchmark output is capped deterministically before injection so that
-the total context stays within the ~15 000-token target.
+1. The project idea (from the session record).
+2. The project context (``CLAUDE.md`` if present, else a minimal stub).
+3. Answered Q&A from the cadrage interview (see ``format_qa``).
+4. Structured constraints extracted from the challenge phase outputs, when
+   they carry a blockers contract (see ``squad.phase_contracts``).
+5. Text outputs from every phase that completed before ``current_phase``.
+
+Phase outputs are filtered by attempt: only the deliverables of the
+latest attempt of each phase are re-injected, so a retry after a
+challenge does not leak the previous conception output alongside the
+new one.
+
+The research/benchmark phase is summarised before re-injection. The
+summariser prefers the structured sections of the agreed report layout
+(executive summary, competitor table, decision-relevant sections) and
+falls back to a deterministic truncation when the report does not have
+the expected headings.
 """
 
+from __future__ import annotations
+
 import logging
+import re
 from pathlib import Path
 
 from sqlite_utils import Database
 
 from squad.config import get_global_db_path
-from squad.constants import PHASE_BENCHMARK, PHASE_LABELS, PHASES
+from squad.constants import PHASE_BENCHMARK, PHASE_CHALLENGE, PHASE_LABELS, PHASES
 from squad.db import get_session, list_phase_outputs
+from squad.models import PhaseOutput
+from squad.phase_contracts import ContractError, parse_blockers_contract
 from squad.workspace import get_context
 
 logger = logging.getLogger(__name__)
@@ -25,28 +43,32 @@ _TARGET_CHARS = 60_000
 # Budget reserved for research/benchmark text within the cumulative context
 _RESEARCH_MAX_CHARS = 16_000
 
+# Headings (lowercased) that the structured benchmark summariser prioritises.
+# Ordered groups: each tuple lists equivalent French/English variants and
+# groups them by their business-decision importance.
+_BENCHMARK_PRIORITY_HEADINGS: tuple[tuple[str, ...], ...] = (
+    ("résumé exécutif", "resume executif", "executive summary"),
+    ("concurrents", "competitors", "competitive landscape"),
+    ("décisions", "decisions", "décision", "decision"),
+    ("analyse par axe", "analysis", "analyses"),
+)
 
-# ── research summariser ────────────────────────────────────────────────────────
+
+# ── research summariser (deterministic fallback) ───────────────────────────────
 
 
 def summarize_research(research_text: str, max_chars: int = _RESEARCH_MAX_CHARS) -> str:
-    """Deterministically truncate a benchmark text to fit within max_chars.
+    """Deterministically truncate a benchmark text to fit within ``max_chars``.
 
     Tries to cut at a paragraph boundary to avoid mid-sentence breaks.
-    Appends a truncation marker so downstream agents know the content was capped.
-
-    Args:
-        research_text: Raw benchmark / research output.
-        max_chars: Maximum character budget (default ~4 000 tokens).
-
-    Returns:
-        Original text if it fits, otherwise a truncated version with a marker.
+    Appends a truncation marker so downstream agents know the content was
+    capped. Safe for any markdown shape — this is the fallback path used
+    when ``summarize_benchmark_structured`` cannot find the expected headings.
     """
     if len(research_text) <= max_chars:
         return research_text
 
     cutoff = max_chars - 120
-    # Prefer a paragraph boundary in the second half of the allowed budget
     boundary = research_text.rfind("\n\n", cutoff // 2, cutoff)
     if boundary > 0:
         cutoff = boundary
@@ -55,6 +77,167 @@ def summarize_research(research_text: str, max_chars: int = _RESEARCH_MAX_CHARS)
         research_text[:cutoff]
         + "\n\n*[Résumé tronqué — contenu complet disponible dans le workspace.]*"
     )
+
+
+# ── structured benchmark summariser ────────────────────────────────────────────
+
+
+_SECTION_HEADING_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
+
+
+def _split_top_level_sections(md: str) -> list[tuple[str, str]]:
+    """Return ``[(heading, body), ...]`` for every top-level ``##`` section.
+
+    ``###`` sub-headings stay inside the body of their parent ``##``.
+    """
+    matches = list(_SECTION_HEADING_RE.finditer(md))
+    if not matches:
+        return []
+    sections: list[tuple[str, str]] = []
+    for i, match in enumerate(matches):
+        heading = match.group(1).strip()
+        body_start = match.end()
+        body_end = matches[i + 1].start() if i + 1 < len(matches) else len(md)
+        body = md[body_start:body_end].strip("\n")
+        sections.append((heading, body))
+    return sections
+
+
+def _matches_priority(heading: str, priorities: tuple[tuple[str, ...], ...]) -> int | None:
+    """Return the index of the priority group the heading matches, or None."""
+    low = heading.strip().lower()
+    for idx, group in enumerate(priorities):
+        for candidate in group:
+            if candidate in low:
+                return idx
+    return None
+
+
+def summarize_benchmark_structured(text: str, max_chars: int = _RESEARCH_MAX_CHARS) -> str:
+    """Summarise a benchmark report by keeping its decision-relevant sections.
+
+    The agreed layout is:
+
+    * ``## Résumé exécutif`` — highest priority (always kept when present).
+    * ``## Concurrents`` — kept next.
+    * Decision-oriented sections (``## Décisions``, ``## Analyse par axe``) — kept
+      while budget remains.
+
+    Sections that do not fit the budget are dropped whole (not cut in the
+    middle) so the re-injected context stays readable. When the report has
+    no recognisable section (prose-only, wrong headings), the function falls
+    back to ``summarize_research`` which applies a deterministic truncation.
+    """
+    if len(text) <= max_chars:
+        return text
+
+    sections = _split_top_level_sections(text)
+    if not sections:
+        return summarize_research(text, max_chars)
+
+    ranked: list[tuple[int, int, str, str]] = []
+    for order_idx, (heading, body) in enumerate(sections):
+        priority = _matches_priority(heading, _BENCHMARK_PRIORITY_HEADINGS)
+        if priority is None:
+            continue
+        ranked.append((priority, order_idx, heading, body))
+    if not ranked:
+        return summarize_research(text, max_chars)
+
+    # Sort by priority group first, then by original order (stable)
+    ranked.sort(key=lambda r: (r[0], r[1]))
+
+    budget = max_chars - 120  # reserve room for the truncation marker
+    kept: list[str] = []
+    used = 0
+    dropped_any = False
+    for _, _, heading, body in ranked:
+        chunk = f"## {heading}\n\n{body}".rstrip()
+        if used + len(chunk) + 4 > budget:
+            dropped_any = True
+            continue
+        kept.append(chunk)
+        used += len(chunk) + 4  # account for the "\n\n" join
+
+    if not kept:
+        return summarize_research(text, max_chars)
+
+    summary = "\n\n".join(kept)
+    if dropped_any or len(text) > len(summary):
+        summary += (
+            "\n\n*[Sections secondaires omises pour tenir le budget — "
+            "rapport complet dans research/benchmark-*.md]*"
+        )
+    return summary
+
+
+# ── Q&A formatter ──────────────────────────────────────────────────────────────
+
+
+def format_qa(questions_and_answers: list[dict]) -> str:
+    """Return a markdown ``## Q&A`` block, or an empty string when nothing to show.
+
+    Each entry is expected to be a mapping with ``agent``, ``phase``,
+    ``question`` and ``answer`` keys (string values). Entries without an
+    answer are skipped.
+    """
+    if not questions_and_answers:
+        return ""
+    lines: list[str] = []
+    for row in questions_and_answers:
+        answer = row.get("answer")
+        if not answer:
+            continue
+        agent = row.get("agent", "?")
+        phase = row.get("phase", "?")
+        question = row.get("question", "")
+        lines.append(f"**Q ({agent}/{phase}):** {question}\n**R:** {answer}")
+    if not lines:
+        return ""
+    return "## Q&A\n\n" + "\n\n".join(lines)
+
+
+# ── challenge constraints ──────────────────────────────────────────────────────
+
+
+def extract_challenge_constraints(outputs: list[PhaseOutput]) -> list[str]:
+    """Extract structured constraints from challenge-phase outputs.
+
+    Parses each challenge output for a blockers contract (see
+    ``squad.phase_contracts``) and returns a flat list of formatted lines.
+    Outputs without a parseable contract are silently ignored; the
+    free-form markdown is still included elsewhere by the caller.
+    """
+    lines: list[str] = []
+    seen: set[str] = set()
+    for po in outputs:
+        if po.phase != PHASE_CHALLENGE:
+            continue
+        try:
+            contract = parse_blockers_contract(po.output)
+        except ContractError:
+            continue
+        for blocker in contract.blockers:
+            key = (blocker.id, blocker.constraint)
+            if key in seen:
+                continue
+            seen.add(key)
+            lines.append(f"- [{blocker.severity}] ({po.agent}/{blocker.id}) {blocker.constraint}")
+    return lines
+
+
+# ── attempt filtering ──────────────────────────────────────────────────────────
+
+
+def _filter_latest_attempt(outputs: list[PhaseOutput]) -> list[PhaseOutput]:
+    """Keep only the outputs that belong to the latest attempt of each phase.
+
+    Preserves input order so downstream formatting stays deterministic.
+    """
+    max_attempt: dict[str, int] = {}
+    for po in outputs:
+        max_attempt[po.phase] = max(max_attempt.get(po.phase, 0), po.attempt)
+    return [po for po in outputs if po.attempt == max_attempt.get(po.phase, 0)]
 
 
 # ── private DB helper ──────────────────────────────────────────────────────────
@@ -86,26 +269,18 @@ def build_cumulative_context(
     """Assemble the cumulative context string to inject into a phase prompt.
 
     Sections included (in order):
+
     1. Project idea (from session record).
-    2. Project context (CLAUDE.md if present, else a minimal stub).
-    3. Answered Q&A from the interviewing step (if any).
-    4. Text outputs from all phases that completed before current_phase.
-       Benchmark output is capped via summarize_research before inclusion.
+    2. Project context (``CLAUDE.md`` if present, else a minimal stub).
+    3. Answered Q&A (from the cadrage interview).
+    4. Constraints extracted from challenge blockers contracts, when any.
+    5. Text outputs from every phase preceding ``current_phase``, filtered
+       to the latest attempt of each phase, with the benchmark section
+       summarised via ``summarize_benchmark_structured``.
 
     The total character length is logged as a warning when it exceeds
-    _TARGET_CHARS (~15 000 tokens). Content is never hard-truncated at the
-    context level — only benchmark text is bounded individually.
-
-    Args:
-        session_id: ID of the active session.
-        current_phase: Phase identifier about to run (must be in constants.PHASES).
-        db_path: Optional path to the SQLite DB; uses the global path if None.
-
-    Returns:
-        Assembled context as a markdown string, sections separated by "---".
-
-    Raises:
-        ValueError: If the session is not found.
+    ``_TARGET_CHARS`` (~15 000 tokens). Content is never hard-truncated at
+    the context level — only benchmark text is bounded individually.
     """
     session = get_session(session_id, db_path=db_path)
     if session is None:
@@ -121,40 +296,44 @@ def build_cumulative_context(
     parts.append(f"## Contexte projet\n\n{project_context}")
 
     # 3. Answered Q&A
-    answered = _get_answered_questions(session_id, db_path)
-    if answered:
-        qa_lines = [
-            f"**Q ({row['agent']}/{row['phase']}):** {row['question']}\n"
-            f"**R:** {row['answer']}"
-            for row in answered
-        ]
-        parts.append("## Q&A\n\n" + "\n\n".join(qa_lines))
+    qa_block = format_qa(_get_answered_questions(session_id, db_path))
+    if qa_block:
+        parts.append(qa_block)
 
-    # 4. Phase outputs from phases preceding current_phase
+    # 4 & 5. Preceding phase outputs + challenge constraints
     if current_phase in PHASES:
         preceding_phases = PHASES[: PHASES.index(current_phase)]
     else:
         preceding_phases = []
 
+    all_outputs: list[PhaseOutput] = []
     if preceding_phases:
         all_outputs = list_phase_outputs(session_id, db_path=db_path)
-        by_phase: dict[str, list] = {}
-        for po in all_outputs:
-            if po.phase in preceding_phases:
-                by_phase.setdefault(po.phase, []).append(po)
+        all_outputs = [po for po in all_outputs if po.phase in preceding_phases]
+        all_outputs = _filter_latest_attempt(all_outputs)
 
-        for phase_id in preceding_phases:
-            phase_outputs = by_phase.get(phase_id, [])
-            if not phase_outputs:
-                continue
-            label = PHASE_LABELS.get(phase_id, phase_id)
-            agent_sections: list[str] = []
-            for po in phase_outputs:
-                content = po.output
-                if phase_id == PHASE_BENCHMARK:
-                    content = summarize_research(content)
-                agent_sections.append(f"### {po.agent}\n\n{content}")
-            parts.append(f"## Phase : {label}\n\n" + "\n\n".join(agent_sections))
+    # Challenge constraints (parsed from blockers contracts)
+    constraints = extract_challenge_constraints(all_outputs)
+    if constraints:
+        parts.append("## Contraintes issues du challenge\n\n" + "\n".join(constraints))
+
+    # Group phase outputs for injection
+    by_phase: dict[str, list[PhaseOutput]] = {}
+    for po in all_outputs:
+        by_phase.setdefault(po.phase, []).append(po)
+
+    for phase_id in preceding_phases:
+        phase_outputs = by_phase.get(phase_id, [])
+        if not phase_outputs:
+            continue
+        label = PHASE_LABELS.get(phase_id, phase_id)
+        agent_sections: list[str] = []
+        for po in phase_outputs:
+            content = po.output
+            if phase_id == PHASE_BENCHMARK:
+                content = summarize_benchmark_structured(content)
+            agent_sections.append(f"### {po.agent}\n\n{content}")
+        parts.append(f"## Phase : {label}\n\n" + "\n\n".join(agent_sections))
 
     context = "\n\n---\n\n".join(parts)
 

@@ -11,9 +11,12 @@ from squad.workspace import (
     create_workspace,
     get_context,
     get_session_workspace,
+    list_benchmarks,
     list_plans,
+    read_benchmark,
     read_pending_questions,
     read_phase_outputs,
+    write_benchmark,
     write_context,
     write_idea,
     write_pending_questions,
@@ -252,3 +255,119 @@ class TestPendingQuestions:
         write_pending_questions(session.id, questions, db_path=db_path)
         result = read_pending_questions(session.id, db_path=db_path)
         assert result[0]["question"] == "Quel est le périmètre ?"
+
+
+# ── research / benchmark ───────────────────────────────────────────────────────
+
+
+class TestBenchmark:
+    def test_write_returns_path(self, session: Session, workspace: Path, db_path: Path):
+        path = write_benchmark(session.id, "my-idea", "# Benchmark\ncontent", db_path=db_path)
+        assert path.exists()
+        assert path.parent == workspace / "research"
+        assert path.name == "benchmark-my-idea.md"
+
+    def test_write_slug_is_sanitised(self, session: Session, db_path: Path):
+        path = write_benchmark(session.id, "B2B SaaS / CRM !!", "body", db_path=db_path)
+        assert "b2b-saas" in path.name
+        assert "/" not in path.name
+
+    def test_read_returns_content(self, session: Session, db_path: Path):
+        write_benchmark(session.id, "s", "# Benchmark\nhi", db_path=db_path)
+        assert read_benchmark(session.id, "s", db_path=db_path) == "# Benchmark\nhi"
+
+    def test_read_missing_returns_none(self, session: Session, db_path: Path):
+        assert read_benchmark(session.id, "ghost", db_path=db_path) is None
+
+    def test_list_benchmarks_sorted(self, session: Session, db_path: Path):
+        write_benchmark(session.id, "beta", "b", db_path=db_path)
+        write_benchmark(session.id, "alpha", "a", db_path=db_path)
+        names = [p.name for p in list_benchmarks(session.id, db_path=db_path)]
+        assert names == ["benchmark-alpha.md", "benchmark-beta.md"]
+
+    def test_overwrite_existing_benchmark(self, session: Session, db_path: Path):
+        write_benchmark(session.id, "s", "v1", db_path=db_path)
+        write_benchmark(session.id, "s", "v2", db_path=db_path)
+        assert read_benchmark(session.id, "s", db_path=db_path) == "v2"
+
+    def test_unicode_preserved(self, session: Session, db_path: Path):
+        write_benchmark(session.id, "unicode", "# Benchmark\néèà", db_path=db_path)
+        assert "éèà" in read_benchmark(session.id, "unicode", db_path=db_path)
+
+
+# ── sync_pending_questions ─────────────────────────────────────────────────────
+
+
+from squad.db import answer_question, create_question  # noqa: E402
+from squad.workspace import sync_pending_questions  # noqa: E402
+
+
+class TestSyncPendingQuestions:
+    def test_writes_current_db_state(self, session: Session, workspace: Path, db_path: Path):
+        q1 = create_question(session.id, "pm", "cadrage", "q1?", db_path=db_path)
+        create_question(session.id, "pm", "cadrage", "q2?", db_path=db_path)
+        path = sync_pending_questions(session.id, db_path=db_path)
+        assert path.exists()
+        content = path.read_text()
+        assert q1.id in content
+        assert "q1?" in content
+        assert "q2?" in content
+
+    def test_drops_answered_questions(self, session: Session, workspace: Path, db_path: Path):
+        q1 = create_question(session.id, "pm", "cadrage", "q1?", db_path=db_path)
+        create_question(session.id, "pm", "cadrage", "q2?", db_path=db_path)
+        answer_question(q1.id, "answer", db_path=db_path)
+        sync_pending_questions(session.id, db_path=db_path)
+        content = (workspace / "questions" / "pending.json").read_text()
+        assert "q2?" in content
+        assert "q1?" not in content
+
+    def test_empty_when_all_answered(self, session: Session, workspace: Path, db_path: Path):
+        q = create_question(session.id, "pm", "cadrage", "only?", db_path=db_path)
+        answer_question(q.id, "yes", db_path=db_path)
+        sync_pending_questions(session.id, db_path=db_path)
+        content = (workspace / "questions" / "pending.json").read_text()
+        assert content.strip() == "[]"
+
+
+# ── copy_plans_to_project ──────────────────────────────────────────────────────
+
+
+from squad.workspace import copy_plans_to_project  # noqa: E402
+
+
+class TestCopyPlansToProject:
+    def test_copies_workspace_plans_to_project(
+        self, session: Session, workspace: Path, db_path: Path, project_path: Path
+    ):
+        (workspace / "plans" / "p1.md").write_text("content p1")
+        (workspace / "plans" / "p2.md").write_text("content p2")
+        copied = copy_plans_to_project(session.id, db_path=db_path)
+        assert len(copied) == 2
+        assert (project_path / "plans" / "p1.md").read_text() == "content p1"
+        assert (project_path / "plans" / "p2.md").read_text() == "content p2"
+
+    def test_overwrites_existing_target(
+        self, session: Session, workspace: Path, db_path: Path, project_path: Path
+    ):
+        (workspace / "plans" / "p1.md").write_text("v2")
+        (project_path / "plans").mkdir()
+        (project_path / "plans" / "p1.md").write_text("v1")
+        copy_plans_to_project(session.id, db_path=db_path)
+        assert (project_path / "plans" / "p1.md").read_text() == "v2"
+
+    def test_empty_when_no_plans(
+        self, session: Session, workspace: Path, db_path: Path, project_path: Path
+    ):
+        assert copy_plans_to_project(session.id, db_path=db_path) == []
+
+    def test_unknown_session_raises(self, db_path: Path):
+        with pytest.raises(ValueError):
+            copy_plans_to_project("ghost", db_path=db_path)
+
+    def test_creates_target_dir(
+        self, session: Session, workspace: Path, db_path: Path, project_path: Path
+    ):
+        (workspace / "plans" / "p.md").write_text("x")
+        copy_plans_to_project(session.id, db_path=db_path)
+        assert (project_path / "plans").is_dir()

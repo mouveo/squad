@@ -68,15 +68,31 @@ def build_agent_prompt(
     session_id: str,
     phase: str,
     context_sections: list[str] | None = None,
+    *,
+    cumulative_context: str | None = None,
+    phase_instruction: str | None = None,
 ) -> str:
-    """Build the full prompt string for a single agent invocation."""
+    """Build the full prompt string for a single agent invocation.
+
+    The executor stays a CLI wrapper: prompt shape is the only thing it
+    owns. Callers in the orchestration layer can pass either a list of
+    ``context_sections`` (joined with ``---``) or a single pre-built
+    ``cumulative_context`` string (produced by ``squad.context_builder``).
+    A ``phase_instruction`` — typically a retry directive with additional
+    constraints — is rendered as a dedicated block when provided.
+    """
     definition = load_agent_definition(agent_name)
     parts = [
         f"# Agent: {agent_name}\n\n{definition}",
         f"## Task\nSession: {session_id}\nPhase: {phase}",
     ]
-    if context_sections:
-        parts.append("## Context\n\n" + "\n\n---\n\n".join(context_sections))
+    sections: list[str] = list(context_sections or [])
+    if cumulative_context:
+        sections.append(cumulative_context)
+    if sections:
+        parts.append("## Context\n\n" + "\n\n---\n\n".join(sections))
+    if phase_instruction:
+        parts.append(f"## Phase instruction\n\n{phase_instruction}")
     parts.append(
         "Produce your analysis and deliverable exactly as described in your definition above."
     )
@@ -152,12 +168,28 @@ def run_agent(
     session_id: str,
     phase: str,
     context_sections: list[str] | None = None,
+    *,
+    cumulative_context: str | None = None,
+    phase_instruction: str | None = None,
 ) -> str:
-    """Run a single agent via Claude CLI. Retries once on failure or empty output."""
+    """Run a single agent via Claude CLI. Retries once on failure or empty output.
+
+    ``cumulative_context`` and ``phase_instruction`` are forwarded to
+    ``build_agent_prompt``. They exist so orchestration code (pipeline,
+    recovery) can pass a pre-built context and a phase-specific directive
+    without moving prompt-shape logic out of the executor.
+    """
     definition = load_agent_definition(agent_name)
     capabilities = parse_agent_capabilities(definition)
     allowed_tools = map_allowed_tools(capabilities)
-    prompt = build_agent_prompt(agent_name, session_id, phase, context_sections)
+    prompt = build_agent_prompt(
+        agent_name,
+        session_id,
+        phase,
+        context_sections,
+        cumulative_context=cumulative_context,
+        phase_instruction=phase_instruction,
+    )
     cmd = _build_cmd(prompt, allowed_tools)
 
     last_error: Exception | None = None
@@ -188,8 +220,16 @@ def run_agents_parallel(
     session_id: str,
     phase: str,
     context_sections_by_agent: dict[str, list[str]] | None = None,
+    *,
+    cumulative_context: str | None = None,
+    phase_instruction: str | None = None,
 ) -> dict[str, str]:
-    """Run multiple agents concurrently. Raises AgentError if any agent fails."""
+    """Run multiple agents concurrently. Raises AgentError if any agent fails.
+
+    A shared ``cumulative_context`` or ``phase_instruction`` is forwarded
+    to every agent. Per-agent ``context_sections_by_agent`` still applies
+    when callers need agent-specific content on top of the shared context.
+    """
     if not agents_list:
         return {}
 
@@ -199,7 +239,15 @@ def run_agents_parallel(
 
     with ThreadPoolExecutor(max_workers=len(agents_list)) as pool:
         futures = {
-            pool.submit(run_agent, agent, session_id, phase, context_map.get(agent)): agent
+            pool.submit(
+                run_agent,
+                agent,
+                session_id,
+                phase,
+                context_map.get(agent),
+                cumulative_context=cumulative_context,
+                phase_instruction=phase_instruction,
+            ): agent
             for agent in agents_list
         }
         for future in as_completed(futures):
@@ -215,6 +263,54 @@ def run_agents_parallel(
         raise AgentError(f"The following agents failed: {failed}")
 
     return results
+
+
+def run_agents_tolerant(
+    agents_list: list[str],
+    session_id: str,
+    phase: str,
+    context_sections_by_agent: dict[str, list[str]] | None = None,
+    *,
+    cumulative_context: str | None = None,
+    phase_instruction: str | None = None,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Run multiple agents concurrently and always return ``(results, errors)``.
+
+    Unlike ``run_agents_parallel``, this helper never raises on a partial
+    failure. The orchestration layer is then free to apply
+    ``phase_config.is_critical_agent`` and decide whether to continue
+    (non-critical failure) or to mark the session as failed (critical
+    failure).
+    """
+    if not agents_list:
+        return {}, {}
+
+    context_map = context_sections_by_agent or {}
+    results: dict[str, str] = {}
+    errors: dict[str, str] = {}
+
+    with ThreadPoolExecutor(max_workers=len(agents_list)) as pool:
+        futures = {
+            pool.submit(
+                run_agent,
+                agent,
+                session_id,
+                phase,
+                context_map.get(agent),
+                cumulative_context=cumulative_context,
+                phase_instruction=phase_instruction,
+            ): agent
+            for agent in agents_list
+        }
+        for future in as_completed(futures):
+            agent = futures[future]
+            try:
+                results[agent] = future.result()
+            except Exception as exc:
+                logger.error("Agent %r failed: %s", agent, exc)
+                errors[agent] = str(exc)
+
+    return results, errors
 
 
 # ── generic task helpers ───────────────────────────────────────────────────────
@@ -249,9 +345,7 @@ def run_task_text(
     except subprocess.TimeoutExpired as exc:
         raise AgentError(f"Task timed out after {timeout}s") from exc
     if completed.returncode != 0:
-        raise AgentError(
-            f"Task failed with code {completed.returncode}: {completed.stderr[:200]}"
-        )
+        raise AgentError(f"Task failed with code {completed.returncode}: {completed.stderr[:200]}")
     text = _extract_text(completed.stdout)
     if not text.strip():
         raise AgentError("Task returned empty output")

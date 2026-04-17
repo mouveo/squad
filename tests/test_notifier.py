@@ -135,3 +135,49 @@ class TestPayloadStructure:
             notify_agent_error("sess-1", "proj", "pm", long_error)
             payload = mock_post.call_args[1]["json"]
         assert len(payload["text"]) < 600  # truncated in the text portion
+
+
+# ── LOT 7: fallback_review, queued, pause ──────────────────────────────────────
+
+
+from squad.notifier import notify_fallback_review, notify_pause, notify_queued  # noqa: E402
+
+
+class TestNotifyFallbackReview:
+    @patch("squad.notifier.httpx.post")
+    def test_sends_payload(self, mock_post, monkeypatch):
+        monkeypatch.setenv("SQUAD_SLACK_WEBHOOK", "https://hook")
+        mock_post.return_value = _mock_response()
+        notify_fallback_review("sess-1", "My project", "forge offline")
+        mock_post.assert_called_once()
+        payload = mock_post.call_args.kwargs.get("json") or mock_post.call_args[1]["json"]
+        assert "fallback" in payload["text"].lower() or "review" in payload["text"].lower()
+        assert "forge offline" in payload["text"]
+
+    @patch("squad.notifier.httpx.post")
+    def test_noop_without_webhook(self, mock_post, monkeypatch):
+        monkeypatch.delenv("SQUAD_SLACK_WEBHOOK", raising=False)
+        monkeypatch.delenv("FORGE_SLACK_WEBHOOK", raising=False)
+        notify_fallback_review("sess-1", "project", "reason")
+        mock_post.assert_not_called()
+
+
+class TestNotifyQueued:
+    @patch("squad.notifier.httpx.post")
+    def test_sends_payload(self, mock_post, monkeypatch):
+        monkeypatch.setenv("SQUAD_SLACK_WEBHOOK", "https://hook")
+        mock_post.return_value = _mock_response()
+        notify_queued("sess-1", "proj", 3)
+        payload = mock_post.call_args.kwargs.get("json") or mock_post.call_args[1]["json"]
+        assert "3" in payload["text"]
+        assert "queue" in payload["text"].lower()
+
+
+class TestNotifyPauseAliasesQuestions:
+    @patch("squad.notifier.httpx.post")
+    def test_shares_payload_with_questions(self, mock_post, monkeypatch):
+        monkeypatch.setenv("SQUAD_SLACK_WEBHOOK", "https://hook")
+        mock_post.return_value = _mock_response()
+        notify_pause("sess-1", "proj", 2)
+        payload = mock_post.call_args.kwargs.get("json") or mock_post.call_args[1]["json"]
+        assert "question" in payload["text"].lower()

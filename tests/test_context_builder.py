@@ -1,7 +1,6 @@
 """Tests for squad/context_builder.py — context assembly and research summarisation."""
 
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -16,12 +15,15 @@ from squad.constants import (
 from squad.context_builder import (
     _RESEARCH_MAX_CHARS,
     _TARGET_CHARS,
+    _filter_latest_attempt,
     _get_answered_questions,
     build_cumulative_context,
+    extract_challenge_constraints,
+    format_qa,
+    summarize_benchmark_structured,
     summarize_research,
 )
 from squad.models import PhaseOutput, Session
-
 
 # ── fixtures ───────────────────────────────────────────────────────────────────
 
@@ -38,14 +40,15 @@ def _make_session(**kwargs) -> Session:
     return Session(**defaults)
 
 
-def _make_phase_output(phase: str, agent: str, output: str) -> PhaseOutput:
+def _make_phase_output(phase: str, agent: str, output: str, attempt: int = 1) -> PhaseOutput:
     return PhaseOutput(
-        id=f"{phase}-{agent}",
+        id=f"{phase}-{agent}-{attempt}",
         session_id="sess-test",
         phase=phase,
         agent=agent,
         output=output,
         file_path=f"/tmp/ws/{phase}/{agent}.md",
+        attempt=attempt,
     )
 
 
@@ -371,4 +374,225 @@ class TestBuildCumulativeContext:
         with patch("squad.context_builder.list_phase_outputs", return_value=outputs):
             ctx = build_cumulative_context("sess-test", PHASE_SYNTHESE)
         # Benchmark is capped; total should be well within target
+        assert len(ctx) < _TARGET_CHARS
+
+
+# ── format_qa ──────────────────────────────────────────────────────────────────
+
+
+class TestFormatQA:
+    def test_empty_list_returns_empty_string(self):
+        assert format_qa([]) == ""
+
+    def test_single_entry(self):
+        out = format_qa(
+            [
+                {
+                    "agent": "pm",
+                    "phase": PHASE_CADRAGE,
+                    "question": "Who is the target?",
+                    "answer": "SMBs",
+                }
+            ]
+        )
+        assert "## Q&A" in out
+        assert "Who is the target?" in out
+        assert "SMBs" in out
+        assert "pm/cadrage" in out
+
+    def test_skips_unanswered(self):
+        out = format_qa(
+            [
+                {"agent": "pm", "phase": PHASE_CADRAGE, "question": "?", "answer": None},
+            ]
+        )
+        assert out == ""
+
+    def test_multiple_entries_separated(self):
+        out = format_qa(
+            [
+                {"agent": "pm", "phase": PHASE_CADRAGE, "question": "q1", "answer": "a1"},
+                {"agent": "pm", "phase": PHASE_CADRAGE, "question": "q2", "answer": "a2"},
+            ]
+        )
+        assert "q1" in out and "q2" in out
+
+
+# ── summarize_benchmark_structured ─────────────────────────────────────────────
+
+
+_STRUCTURED_REPORT = """# Benchmark
+
+## Résumé exécutif
+
+- point A
+- point B
+
+## Concurrents
+
+| Acteur | Positionnement |
+| --- | --- |
+| X | leader |
+
+## Analyse par axe
+
+### Axis 1
+
+Long detail here.
+
+## Sources
+
+- https://example.com
+"""
+
+
+class TestSummarizeBenchmarkStructured:
+    def test_short_text_returned_unchanged(self):
+        text = "short benchmark"
+        assert summarize_benchmark_structured(text, max_chars=500) == text
+
+    def test_keeps_resume_executif_and_concurrents(self):
+        # Build a long but structured report
+        long_axis = "word " * 3000
+        text = _STRUCTURED_REPORT.replace("Long detail here.", long_axis)
+        out = summarize_benchmark_structured(text, max_chars=2000)
+        assert "Résumé exécutif" in out
+        assert "Concurrents" in out
+
+    def test_drops_secondary_sections_to_fit_budget(self):
+        long_axis = "word " * 3000
+        text = _STRUCTURED_REPORT.replace("Long detail here.", long_axis)
+        out = summarize_benchmark_structured(text, max_chars=800)
+        assert len(out) <= 1200  # modest overhead for omission marker
+        assert "Sections secondaires omises" in out or "tronqué" in out
+
+    def test_fallback_to_deterministic_truncation_when_no_structure(self):
+        prose = "x" * 5000
+        out = summarize_benchmark_structured(prose, max_chars=1000)
+        assert "tronqué" in out
+
+    def test_fallback_when_no_priority_heading(self):
+        # Structured but headings not recognised
+        text = "## Random\n\n" + ("y" * 5000) + "\n\n## Another\n\nmore"
+        out = summarize_benchmark_structured(text, max_chars=500)
+        assert "tronqué" in out
+
+
+# ── extract_challenge_constraints ──────────────────────────────────────────────
+
+
+class TestExtractChallengeConstraints:
+    def test_returns_empty_when_no_challenge_output(self):
+        outputs = [_make_phase_output(PHASE_CADRAGE, "pm", "some text")]
+        assert extract_challenge_constraints(outputs) == []
+
+    def test_parses_blockers_from_challenge_output(self):
+        content = (
+            "# Security challenge\n\n"
+            '```json\n{"blockers": [{"id": "b1", "severity": "blocking", '
+            '"constraint": "No auth wall"}]}\n```'
+        )
+        outputs = [_make_phase_output(PHASE_CHALLENGE, "security", content)]
+        lines = extract_challenge_constraints(outputs)
+        assert len(lines) == 1
+        assert "blocking" in lines[0]
+        assert "No auth wall" in lines[0]
+        assert "security" in lines[0]
+
+    def test_ignores_unparseable_output(self):
+        outputs = [_make_phase_output(PHASE_CHALLENGE, "security", "no json here")]
+        assert extract_challenge_constraints(outputs) == []
+
+    def test_dedupes_identical_constraints(self):
+        body = (
+            '```json\n{"blockers": [{"id": "b1", "severity": "major", "constraint": "same"}]}\n```'
+        )
+        outputs = [
+            _make_phase_output(PHASE_CHALLENGE, "security", body),
+            _make_phase_output(PHASE_CHALLENGE, "delivery", body),
+        ]
+        assert len(extract_challenge_constraints(outputs)) == 1
+
+
+# ── _filter_latest_attempt ─────────────────────────────────────────────────────
+
+
+class TestFilterLatestAttempt:
+    def test_keeps_only_latest_per_phase(self):
+        outputs = [
+            _make_phase_output(PHASE_CONCEPTION, "architect", "v1", attempt=1),
+            _make_phase_output(PHASE_CONCEPTION, "architect", "v2", attempt=2),
+            _make_phase_output(PHASE_CADRAGE, "pm", "cadrage", attempt=1),
+        ]
+        filtered = _filter_latest_attempt(outputs)
+        assert len(filtered) == 2
+        texts = {po.output for po in filtered}
+        assert texts == {"v2", "cadrage"}
+
+    def test_preserves_order(self):
+        outputs = [
+            _make_phase_output(PHASE_CADRAGE, "pm", "a", attempt=1),
+            _make_phase_output(PHASE_CONCEPTION, "ux", "b", attempt=1),
+            _make_phase_output(PHASE_CONCEPTION, "ux", "c", attempt=2),
+        ]
+        filtered = _filter_latest_attempt(outputs)
+        assert [po.output for po in filtered] == ["a", "c"]
+
+
+# ── attempt-aware build_cumulative_context ─────────────────────────────────────
+
+
+class TestBuildCumulativeContextAttemptAware:
+    def test_only_latest_attempt_reinjected(
+        self,
+        patch_get_session,
+        patch_get_context,
+        patch_answered_questions,
+    ):
+        outputs = [
+            _make_phase_output(PHASE_CONCEPTION, "architect", "stale attempt", attempt=1),
+            _make_phase_output(PHASE_CONCEPTION, "architect", "fresh attempt", attempt=2),
+        ]
+        with patch("squad.context_builder.list_phase_outputs", return_value=outputs):
+            ctx = build_cumulative_context("sess-test", PHASE_CHALLENGE)
+        assert "fresh attempt" in ctx
+        assert "stale attempt" not in ctx
+
+    def test_challenge_constraints_section_included(
+        self,
+        patch_get_session,
+        patch_get_context,
+        patch_answered_questions,
+    ):
+        challenge_body = (
+            "# Security challenge\n"
+            '```json\n{"blockers": [{"id": "b1", "severity": "blocking", '
+            '"constraint": "Missing rate limiting"}]}\n```'
+        )
+        outputs = [_make_phase_output(PHASE_CHALLENGE, "security", challenge_body)]
+        with patch("squad.context_builder.list_phase_outputs", return_value=outputs):
+            ctx = build_cumulative_context("sess-test", PHASE_SYNTHESE)
+        assert "Contraintes issues du challenge" in ctx
+        assert "Missing rate limiting" in ctx
+
+    def test_structured_benchmark_summarised_before_injection(
+        self,
+        patch_get_session,
+        patch_get_context,
+        patch_answered_questions,
+    ):
+        axis_body = "detail " * 4000  # much larger than budget
+        report = (
+            "# Benchmark\n\n"
+            "## Résumé exécutif\n\n- p1\n\n"
+            "## Concurrents\n\n| X | Y |\n\n"
+            f"## Analyse par axe\n\n{axis_body}\n\n"
+            "## Sources\n\n- https://x"
+        )
+        outputs = [_make_phase_output(PHASE_BENCHMARK, "research", report)]
+        with patch("squad.context_builder.list_phase_outputs", return_value=outputs):
+            ctx = build_cumulative_context("sess-test", PHASE_CONCEPTION)
+        assert "Résumé exécutif" in ctx
+        assert "Concurrents" in ctx
+        # Budget cap respected
         assert len(ctx) < _TARGET_CHARS

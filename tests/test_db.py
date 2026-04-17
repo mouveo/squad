@@ -18,14 +18,20 @@ from squad.db import (
     create_question,
     create_session,
     ensure_schema,
+    get_phase_attempt,
     get_session,
+    increment_challenge_retry_count,
+    increment_phase_attempt,
     list_active_sessions,
     list_pending_questions,
     list_phase_outputs,
     list_plans,
     list_session_history,
+    mark_phase_skipped,
+    update_session_profile,
     update_session_status,
 )
+from squad.models import RESEARCH_DEPTH_DEEP, RESEARCH_DEPTH_LIGHT
 
 
 @pytest.fixture
@@ -288,3 +294,130 @@ class TestPlans:
         s2 = _session(db_path)
         create_plan(s1.id, "Plan 1", "/p1.md", "content", db_path=db_path)
         assert list_plans(s2.id, db_path=db_path) == []
+
+
+# ── session profile (LOT 2) ────────────────────────────────────────────────────
+
+
+class TestSessionProfile:
+    def test_new_session_has_empty_profile(self, db_path: Path):
+        s = _session(db_path)
+        fetched = get_session(s.id, db_path)
+        assert fetched.subject_type is None
+        assert fetched.research_depth is None
+        assert fetched.agents_by_phase == {}
+        assert fetched.phase_attempts == {}
+        assert fetched.challenge_retry_count == 0
+        assert fetched.skipped_phases == {}
+
+    def test_update_and_roundtrip_profile(self, db_path: Path):
+        s = _session(db_path)
+        update_session_profile(
+            session_id=s.id,
+            subject_type="ai_product",
+            research_depth=RESEARCH_DEPTH_DEEP,
+            agents_by_phase={
+                "etat_des_lieux": ["ux", "data"],
+                "conception": ["ai-lead", "architect"],
+            },
+            db_path=db_path,
+        )
+        fetched = get_session(s.id, db_path)
+        assert fetched.subject_type == "ai_product"
+        assert fetched.research_depth == RESEARCH_DEPTH_DEEP
+        assert fetched.agents_by_phase["etat_des_lieux"] == ["ux", "data"]
+        assert fetched.agents_by_phase["conception"] == ["ai-lead", "architect"]
+
+    def test_mark_phase_skipped(self, db_path: Path):
+        s = _session(db_path)
+        mark_phase_skipped(s.id, "benchmark", "research_depth=light", db_path=db_path)
+        fetched = get_session(s.id, db_path)
+        assert fetched.skipped_phases == {"benchmark": "research_depth=light"}
+
+    def test_mark_phase_skipped_accumulates(self, db_path: Path):
+        s = _session(db_path)
+        mark_phase_skipped(s.id, "benchmark", "light", db_path=db_path)
+        mark_phase_skipped(s.id, "challenge", "out of scope", db_path=db_path)
+        fetched = get_session(s.id, db_path)
+        assert fetched.skipped_phases == {
+            "benchmark": "light",
+            "challenge": "out of scope",
+        }
+
+    def test_increment_phase_attempt(self, db_path: Path):
+        s = _session(db_path)
+        assert increment_phase_attempt(s.id, "conception", db_path=db_path) == 1
+        assert increment_phase_attempt(s.id, "conception", db_path=db_path) == 2
+        assert get_phase_attempt(s.id, "conception", db_path=db_path) == 2
+
+    def test_phase_attempt_isolated_per_phase(self, db_path: Path):
+        s = _session(db_path)
+        increment_phase_attempt(s.id, "conception", db_path=db_path)
+        increment_phase_attempt(s.id, "conception", db_path=db_path)
+        increment_phase_attempt(s.id, "cadrage", db_path=db_path)
+        assert get_phase_attempt(s.id, "conception", db_path=db_path) == 2
+        assert get_phase_attempt(s.id, "cadrage", db_path=db_path) == 1
+        assert get_phase_attempt(s.id, "benchmark", db_path=db_path) == 0
+
+    def test_increment_challenge_retry_count(self, db_path: Path):
+        s = _session(db_path)
+        assert increment_challenge_retry_count(s.id, db_path=db_path) == 1
+        assert increment_challenge_retry_count(s.id, db_path=db_path) == 2
+        fetched = get_session(s.id, db_path)
+        assert fetched.challenge_retry_count == 2
+
+    def test_profile_survives_crash_simulation(self, db_path: Path):
+        s = _session(db_path)
+        update_session_profile(
+            session_id=s.id,
+            subject_type="b2b_saas",
+            research_depth=RESEARCH_DEPTH_LIGHT,
+            agents_by_phase={"conception": ["ux", "architect"]},
+            db_path=db_path,
+        )
+        increment_phase_attempt(s.id, "cadrage", db_path=db_path)
+        # Simulate process restart: reopen the same DB via a new call path
+        fetched = get_session(s.id, db_path=db_path)
+        assert fetched.subject_type == "b2b_saas"
+        assert fetched.research_depth == RESEARCH_DEPTH_LIGHT
+        assert fetched.phase_attempts == {"cadrage": 1}
+
+
+class TestPhaseOutputAttempt:
+    def test_default_attempt_is_one(self, db_path: Path):
+        s = _session(db_path)
+        po = create_phase_output(
+            s.id, PHASE_CONCEPTION, "architect", "out", "/f.md", db_path=db_path
+        )
+        assert po.attempt == 1
+
+    def test_second_attempt_persisted(self, db_path: Path):
+        s = _session(db_path)
+        create_phase_output(s.id, PHASE_CONCEPTION, "architect", "first", "/f1.md", db_path=db_path)
+        create_phase_output(
+            s.id,
+            PHASE_CONCEPTION,
+            "architect",
+            "retry",
+            "/f2.md",
+            attempt=2,
+            db_path=db_path,
+        )
+        outputs = list_phase_outputs(s.id, phase=PHASE_CONCEPTION, db_path=db_path)
+        assert {po.attempt for po in outputs} == {1, 2}
+
+    def test_list_filtered_by_attempt(self, db_path: Path):
+        s = _session(db_path)
+        create_phase_output(s.id, PHASE_CONCEPTION, "architect", "first", "/f1.md", db_path=db_path)
+        create_phase_output(
+            s.id,
+            PHASE_CONCEPTION,
+            "architect",
+            "retry",
+            "/f2.md",
+            attempt=2,
+            db_path=db_path,
+        )
+        latest = list_phase_outputs(s.id, phase=PHASE_CONCEPTION, attempt=2, db_path=db_path)
+        assert len(latest) == 1
+        assert latest[0].output == "retry"

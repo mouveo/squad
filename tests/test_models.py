@@ -29,12 +29,17 @@ from squad.constants import (
     STATUS_WORKING,
 )
 from squad.models import (
+    RESEARCH_DEPTH_DEEP,
+    RESEARCH_DEPTH_LIGHT,
+    RESEARCH_DEPTH_NORMAL,
+    RESEARCH_DEPTHS,
     GeneratedPlan,
     PhaseOutput,
     Question,
     Session,
     SessionMode,
     SessionStatus,
+    SubjectProfile,
 )
 
 # ── constants ──────────────────────────────────────────────────────────────────
@@ -204,7 +209,20 @@ class TestPhaseOutput:
         )
         assert po.duration_seconds is None
         assert po.tokens_used is None
+        assert po.attempt == 1
         assert po.created_at is not None
+
+    def test_attempt_tracking(self):
+        po = PhaseOutput(
+            id="po-2",
+            session_id="sess-1",
+            phase=PHASE_CADRAGE,
+            agent="pm",
+            output="retry output",
+            file_path="/f.md",
+            attempt=2,
+        )
+        assert po.attempt == 2
 
 
 class TestQuestion:
@@ -231,3 +249,71 @@ class TestGeneratedPlan:
         )
         assert p.forge_status is None
         assert p.created_at is not None
+
+
+# ── session profile (LOT 2) ────────────────────────────────────────────────────
+
+
+class TestSessionProfileFields:
+    def _make(self, **kwargs) -> Session:
+        defaults = dict(
+            id="sess-1",
+            title="Test",
+            project_path="/tmp/proj",
+            workspace_path="/tmp/proj/.squad/sessions/sess-1",
+            idea="x",
+        )
+        return Session(**{**defaults, **kwargs})
+
+    def test_profile_defaults_are_empty(self):
+        s = self._make()
+        assert s.subject_type is None
+        assert s.research_depth is None
+        assert s.agents_by_phase == {}
+        assert s.phase_attempts == {}
+        assert s.challenge_retry_count == 0
+        assert s.skipped_phases == {}
+
+    def test_profile_fields_round_trip(self):
+        s = self._make(
+            subject_type="b2b_saas",
+            research_depth=RESEARCH_DEPTH_DEEP,
+            agents_by_phase={"etat_des_lieux": ["sales", "ux"]},
+            phase_attempts={"cadrage": 2},
+            challenge_retry_count=1,
+            skipped_phases={"benchmark": "light"},
+        )
+        assert s.subject_type == "b2b_saas"
+        assert s.research_depth == RESEARCH_DEPTH_DEEP
+        assert s.agents_by_phase == {"etat_des_lieux": ["sales", "ux"]}
+        assert s.phase_attempts == {"cadrage": 2}
+        assert s.challenge_retry_count == 1
+        assert s.skipped_phases == {"benchmark": "light"}
+
+    def test_invalid_depth_rejected(self):
+        with pytest.raises(ValueError):
+            self._make(research_depth="extreme")
+
+
+class TestSubjectProfile:
+    def test_valid_profile(self):
+        p = SubjectProfile(
+            subject_type="ai_product",
+            research_depth=RESEARCH_DEPTH_NORMAL,
+            agents_by_phase={"conception": ["ai-lead", "architect"]},
+        )
+        assert p.subject_type == "ai_product"
+        assert p.research_depth == RESEARCH_DEPTH_NORMAL
+
+    def test_empty_agents_by_phase_default(self):
+        p = SubjectProfile(subject_type="x", research_depth=RESEARCH_DEPTH_LIGHT)
+        assert p.agents_by_phase == {}
+
+    def test_invalid_depth_rejected(self):
+        with pytest.raises(ValueError):
+            SubjectProfile(subject_type="x", research_depth="magic")
+
+
+class TestResearchDepthConstants:
+    def test_all_depths_present(self):
+        assert set(RESEARCH_DEPTHS) == {"light", "normal", "deep"}
