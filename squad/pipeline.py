@@ -44,6 +44,7 @@ from squad.db import (
     increment_phase_attempt,
     update_session_status,
 )
+from squad.constants import PHASE_BENCHMARK
 from squad.executor import AgentError, run_agent, run_agents_tolerant
 from squad.forge_format import ForgeFormatError
 from squad.phase_config import (
@@ -52,6 +53,7 @@ from squad.phase_config import (
     is_critical_agent,
     iter_phases,
 )
+from squad.research import run_research
 from squad.phase_contracts import (
     ContractError,
     QuestionsContract,
@@ -141,6 +143,16 @@ def _run_agents(
     errors: dict[str, str] = {}
     for agent in agents:
         try:
+            # The benchmark phase uses the dedicated research service rather
+            # than a generic .md agent definition (there is no agents/research.md).
+            if cfg.phase == PHASE_BENCHMARK and agent == "research":
+                report = run_research(
+                    session_id=session_id,
+                    extra_context=cumulative_context,
+                )
+                results[agent] = report.content
+                continue
+
             results[agent] = run_agent(
                 agent_name=agent,
                 session_id=session_id,
@@ -150,6 +162,8 @@ def _run_agents(
             )
         except AgentError as exc:
             errors[agent] = str(exc)
+        except Exception as exc:  # noqa: BLE001
+            errors[agent] = f"{type(exc).__name__}: {exc}"
     return results, errors
 
 
