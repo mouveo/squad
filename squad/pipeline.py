@@ -31,10 +31,12 @@ from typing import Callable
 from types import SimpleNamespace
 
 from squad.constants import (
+    PHASE_BENCHMARK,
     PHASE_CADRAGE,
     PHASE_CHALLENGE,
     PHASE_CONCEPTION,
     PHASE_IDEATION,
+    PHASE_SYNTHESE,
     PHASES,
     STATUS_FAILED,
     STATUS_INTERVIEWING,
@@ -55,7 +57,6 @@ from squad.db import (
     update_session_status,
 )
 from squad.input_richness import score_input_richness
-from squad.constants import PHASE_BENCHMARK
 from squad.executor import AgentError, run_agent, run_agents_tolerant
 from squad.forge_format import ForgeFormatError
 from squad.models import (
@@ -70,8 +71,10 @@ from squad.phase_config import (
     get_phase_config,
     is_critical_agent,
     iter_phases,
+    should_skip_phase,
 )
 from squad.research import run_research
+from squad.subject_detector import detect_and_persist
 
 try:  # LOT 3 ships squad.ideation; until then the pipeline falls back gracefully.
     from squad.ideation import run_ideation as _run_ideation
@@ -106,6 +109,50 @@ logger = logging.getLogger(__name__)
 # Glob/LS/Grep/Read resolve against the real project rather than the
 # Squad workspace.
 _AGENTS_WITH_PROJECT_CWD: set[str] = {"ux", "architect"}
+
+# Phases whose agents reason on the persisted subject profile
+# (research depth for the benchmark, agent composition for the rest).
+# Entering any of these requires a classified session so the skip
+# policy has been populated and the research budget is known.
+_PROFILE_DEPENDENT_PHASES: set[str] = {
+    PHASE_BENCHMARK,
+    PHASE_CONCEPTION,
+    PHASE_CHALLENGE,
+    PHASE_SYNTHESE,
+}
+
+
+def _ensure_subject_profile(session, db_path: Path | None):
+    """Guarantee that ``session`` has ``subject_type`` and ``research_depth`` set.
+
+    When either field is missing, delegate to
+    :func:`squad.subject_detector.detect_and_persist` (which also marks
+    the benchmark as skipped when the detected depth is ``light``) and
+    reload the session so callers see the persisted profile and the
+    populated ``skipped_phases`` mapping.
+    """
+    if session.subject_type and session.research_depth:
+        return session
+    logger.info(
+        "Session %s entering pipeline without subject profile — classifying",
+        session.id,
+    )
+    detect_and_persist(session.id, use_llm=True, db_path=db_path)
+    refreshed = get_session(session.id, db_path=db_path)
+    return refreshed or session
+
+
+def _should_skip_phase(session, phase: str) -> bool:
+    """True when ``phase`` must be skipped for ``session``.
+
+    Honors the persisted ``skipped_phases`` mapping (set explicitly by
+    ``detect_and_persist`` for ``light`` sessions) AND the declarative
+    ``phase_config.should_skip_phase`` policy so manual test setups
+    without a persisted skip still land on the right branch.
+    """
+    if phase in (session.skipped_phases or {}):
+        return True
+    return should_skip_phase(phase, session.research_depth)
 
 
 def _resolve_agent_cwd(session, agent_name: str) -> str | None:
@@ -526,6 +573,26 @@ def run_phase(
     constraints without moving logic into the executor.
     """
     cfg = get_phase_config(phase)
+
+    session = get_session(session_id, db_path=db_path)
+    if session is None:
+        raise PipelineError(f"Session not found: {session_id!r}")
+
+    # Ensure the subject profile is known before any phase that reasons
+    # on it, so downstream branches (research budget, agent composition)
+    # never see a missing ``research_depth``.
+    if phase in _PROFILE_DEPENDENT_PHASES:
+        session = _ensure_subject_profile(session, db_path)
+
+    # Honor the skip policy before mutating session state: this mirrors
+    # what ``run_pipeline`` does in its loop so a direct ``run_phase``
+    # call on a ``light`` benchmark behaves the same way.
+    if _should_skip_phase(session, phase):
+        logger.info(
+            "Skipping phase %s for session %s (skip policy)", phase, session_id
+        )
+        return PhaseResult(phase=phase, attempt=0, outputs={}, errors={})
+
     attempt = increment_phase_attempt(session_id, phase, db_path=db_path)
 
     update_session_status(
@@ -535,9 +602,8 @@ def run_phase(
         db_path=db_path,
     )
 
-    session = get_session(session_id, db_path=db_path)
-    if session is None:
-        raise PipelineError(f"Session not found: {session_id!r}")
+    # Refresh after status updates so downstream code sees the latest row.
+    session = get_session(session_id, db_path=db_path) or session
 
     # Recompute input richness on every entry into ideation so that
     # attachments dropped after session creation but before this phase
@@ -679,6 +745,12 @@ def run_pipeline(
 
     started_at = session.created_at or datetime.utcnow()
 
+    # Classify once at pipeline entry so the skip policy (e.g. light →
+    # skip benchmark) is persisted on the session row before the loop
+    # looks at it. Sessions that already carry a profile (CLI, Slack,
+    # resume) are a no-op here.
+    session = _ensure_subject_profile(session, db_path)
+
     start_idx = 0
     if start_phase is not None:
         if start_phase not in PHASES:
@@ -690,6 +762,19 @@ def run_pipeline(
     try:
         while phase_idx < len(PHASES):
             cfg = iter_phases()[phase_idx]
+
+            # Refresh the session so skips persisted mid-pipeline
+            # (e.g. by a previous classification) are visible here.
+            session = get_session(session_id, db_path=db_path) or session
+            if _should_skip_phase(session, cfg.phase):
+                logger.info(
+                    "Skipping phase %s for session %s (skip policy)",
+                    cfg.phase,
+                    session_id,
+                )
+                phase_idx += 1
+                continue
+
             instruction = phase_instruction if first_iteration else None
             first_iteration = False
 
