@@ -14,9 +14,11 @@ from squad.constants import (
     CAP_WRITE_FILES,
     MODE_APPROVAL,
     MODE_AUTONOMOUS,
+    PHASE_BENCHMARK,
     PHASE_CADRAGE,
     PHASE_DIRS,
     PHASE_ETAT_DES_LIEUX,
+    PHASE_IDEATION,
     PHASE_LABELS,
     PHASE_SYNTHESE,
     PHASES,
@@ -43,6 +45,7 @@ from squad.models import (
     RESEARCH_DEPTHS,
     AttachmentMeta,
     GeneratedPlan,
+    IdeationAngle,
     PhaseOutput,
     PipelineEvent,
     Question,
@@ -60,11 +63,20 @@ class TestPhaseConstants:
         assert PHASES == [
             "cadrage",
             "etat_des_lieux",
+            "ideation",
             "benchmark",
             "conception",
             "challenge",
             "synthese",
         ]
+
+    def test_ideation_sits_between_etat_des_lieux_and_benchmark(self):
+        # Inserted between etat_des_lieux (index 1) and benchmark —
+        # so ideation is at index 2 in the 0-based PHASES list.
+        assert PHASES.index(PHASE_IDEATION) == 2
+        assert PHASES.index(PHASE_IDEATION) == PHASES.index(PHASE_ETAT_DES_LIEUX) + 1
+        assert PHASES.index(PHASE_BENCHMARK) == PHASES.index(PHASE_IDEATION) + 1
+        assert len(PHASES) == 7
 
     def test_phases_are_ascii(self):
         for phase in PHASES:
@@ -90,7 +102,9 @@ class TestPhaseConstants:
     def test_phase_dirs_content(self):
         assert PHASE_DIRS[PHASE_CADRAGE] == "1-cadrage"
         assert PHASE_DIRS[PHASE_ETAT_DES_LIEUX] == "2-etat-des-lieux"
-        assert PHASE_DIRS[PHASE_SYNTHESE] == "6-synthese"
+        assert PHASE_DIRS[PHASE_IDEATION] == "3-ideation"
+        assert PHASE_DIRS[PHASE_BENCHMARK] == "4-benchmark"
+        assert PHASE_DIRS[PHASE_SYNTHESE] == "7-synthese"
 
 
 class TestSessionStatusConstants:
@@ -512,3 +526,66 @@ class TestAttachmentMeta:
         assert m.mime_type is None
         assert m.slack_file_id is None
         assert m.uploaded_at is not None
+
+
+# ── Ideation (Plan 6 — LOT 1) ─────────────────────────────────────────────────
+
+
+class TestSessionIdeationFields:
+    def _make(self, **kwargs) -> Session:
+        defaults = dict(
+            id="sess-1",
+            title="Test",
+            project_path="/tmp/proj",
+            workspace_path="/tmp/proj/.squad/sessions/sess-1",
+            idea="x",
+        )
+        return Session(**{**defaults, **kwargs})
+
+    def test_ideation_defaults(self):
+        s = self._make()
+        assert s.input_richness is None
+        assert s.selected_angle_idx is None
+        assert s.benchmark_all_angles is False
+
+    def test_ideation_fields_roundtrip(self):
+        s = self._make(
+            input_richness="rich",
+            selected_angle_idx=2,
+            benchmark_all_angles=True,
+        )
+        assert s.input_richness == "rich"
+        assert s.selected_angle_idx == 2
+        assert s.benchmark_all_angles is True
+
+
+class TestIdeationAngle:
+    def test_default_created_at_is_iso_string(self):
+        a = IdeationAngle(
+            session_id="sess-1",
+            idx=0,
+            title="Angle A",
+            segment="SMB ops",
+            value_prop="Save 2h/week",
+            approach="Automation",
+            divergence_note="B2B focus",
+        )
+        assert a.idx == 0
+        assert isinstance(a.created_at, str)
+        # ISO format is parseable
+        from datetime import datetime
+
+        datetime.fromisoformat(a.created_at)
+
+    def test_explicit_created_at_preserved(self):
+        a = IdeationAngle(
+            session_id="sess-1",
+            idx=1,
+            title="Angle B",
+            segment="Enterprise",
+            value_prop="Audit trail",
+            approach="Governance-first",
+            divergence_note="Opposite of A",
+            created_at="2026-04-18T12:00:00",
+        )
+        assert a.created_at == "2026-04-18T12:00:00"

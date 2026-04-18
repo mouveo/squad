@@ -8,6 +8,7 @@ from squad.constants import (
     PHASE_CHALLENGE,
     PHASE_CONCEPTION,
     PHASE_ETAT_DES_LIEUX,
+    PHASE_IDEATION,
     PHASE_SYNTHESE,
     PHASES,
 )
@@ -86,6 +87,36 @@ class TestBenchmarkConfig:
         cfg = get_phase_config(PHASE_BENCHMARK)
         assert cfg.skip_policy.skippable is True
         assert "light" in cfg.skip_policy.skip_when_depth
+
+
+class TestIdeationConfig:
+    def test_default_agent_is_ideation(self):
+        cfg = get_phase_config(PHASE_IDEATION)
+        assert cfg.default_agents == ("ideation",)
+
+    def test_is_sequential_and_non_critical(self):
+        cfg = get_phase_config(PHASE_IDEATION)
+        assert cfg.parallel is False
+        assert cfg.critical_agents == ()
+
+    def test_can_pause_but_asks_no_questions(self):
+        cfg = get_phase_config(PHASE_IDEATION)
+        assert cfg.can_pause is True
+        assert cfg.max_questions == 0
+
+    def test_single_attempt_no_retry_field(self):
+        cfg = get_phase_config(PHASE_IDEATION)
+        assert cfg.retry_policy.max_attempts == 1
+        assert cfg.retry_policy.retry_on_contract_field is None
+
+    def test_not_skippable(self):
+        cfg = get_phase_config(PHASE_IDEATION)
+        assert cfg.skip_policy.skippable is False
+
+    def test_order_sits_between_etat_des_lieux_and_benchmark(self):
+        assert get_phase_config(PHASE_ETAT_DES_LIEUX).order == 2
+        assert get_phase_config(PHASE_IDEATION).order == 3
+        assert get_phase_config(PHASE_BENCHMARK).order == 4
 
 
 class TestConceptionConfig:

@@ -3,6 +3,7 @@
 # Phase identifiers (ASCII snake_case — used in code, DB and filesystem)
 PHASE_CADRAGE = "cadrage"
 PHASE_ETAT_DES_LIEUX = "etat_des_lieux"
+PHASE_IDEATION = "ideation"
 PHASE_BENCHMARK = "benchmark"
 PHASE_CONCEPTION = "conception"
 PHASE_CHALLENGE = "challenge"
@@ -11,6 +12,7 @@ PHASE_SYNTHESE = "synthese"
 PHASES: list[str] = [
     PHASE_CADRAGE,
     PHASE_ETAT_DES_LIEUX,
+    PHASE_IDEATION,
     PHASE_BENCHMARK,
     PHASE_CONCEPTION,
     PHASE_CHALLENGE,
@@ -21,6 +23,7 @@ PHASES: list[str] = [
 PHASE_LABELS: dict[str, str] = {
     PHASE_CADRAGE: "Cadrage",
     PHASE_ETAT_DES_LIEUX: "État des lieux",
+    PHASE_IDEATION: "Idéation",
     PHASE_BENCHMARK: "Benchmark",
     PHASE_CONCEPTION: "Conception",
     PHASE_CHALLENGE: "Challenge",
@@ -31,10 +34,11 @@ PHASE_LABELS: dict[str, str] = {
 PHASE_DIRS: dict[str, str] = {
     PHASE_CADRAGE: "1-cadrage",
     PHASE_ETAT_DES_LIEUX: "2-etat-des-lieux",
-    PHASE_BENCHMARK: "3-benchmark",
-    PHASE_CONCEPTION: "4-conception",
-    PHASE_CHALLENGE: "5-challenge",
-    PHASE_SYNTHESE: "6-synthese",
+    PHASE_IDEATION: "3-ideation",
+    PHASE_BENCHMARK: "4-benchmark",
+    PHASE_CONCEPTION: "5-conception",
+    PHASE_CHALLENGE: "6-challenge",
+    PHASE_SYNTHESE: "7-synthese",
 }
 
 # Session statuses

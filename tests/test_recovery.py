@@ -10,6 +10,7 @@ from squad.constants import (
     PHASE_CHALLENGE,
     PHASE_CONCEPTION,
     PHASE_ETAT_DES_LIEUX,
+    PHASE_IDEATION,
     STATUS_DONE,
     STATUS_DRAFT,
     STATUS_FAILED,
@@ -289,3 +290,41 @@ class TestDetermineResumePoint:
         rp = determine_resume_point(s.id, db_path=db_path)
         # Retry budget used; resume at challenge (not conception)
         assert rp.phase == PHASE_CHALLENGE
+
+
+# ── ideation pause / resume (LOT 5) ────────────────────────────────────────────
+
+
+class TestDetermineResumePointIdeationPause:
+    def test_ideation_interviewing_without_selection_raises(self, db_path):
+        """A paused ideation session with no angle picked yet cannot resume."""
+        s = _session(db_path)
+        update_session_status(
+            s.id, STATUS_INTERVIEWING, current_phase=PHASE_IDEATION, db_path=db_path
+        )
+        with pytest.raises(RuntimeError, match="angle"):
+            determine_resume_point(s.id, db_path=db_path)
+
+    def test_ideation_interviewing_with_selection_resumes_at_benchmark(self, db_path):
+        from squad.db import set_selected_angle
+
+        s = _session(db_path)
+        update_session_status(
+            s.id, STATUS_INTERVIEWING, current_phase=PHASE_IDEATION, db_path=db_path
+        )
+        set_selected_angle(db_path, s.id, 2)
+        rp = determine_resume_point(s.id, db_path=db_path)
+        assert rp.phase == PHASE_BENCHMARK
+
+    def test_cadrage_interviewing_unaffected_by_ideation_branch(self, db_path):
+        """Existing cadrage path keeps its current behaviour (after answers)."""
+        from squad.db import answer_question
+
+        s = _session(db_path)
+        update_session_status(
+            s.id, STATUS_INTERVIEWING, current_phase=PHASE_CADRAGE, db_path=db_path
+        )
+        q = create_question(s.id, "pm", PHASE_CADRAGE, "Q?", db_path=db_path)
+        answer_question(q.id, "A", db_path=db_path)
+        rp = determine_resume_point(s.id, db_path=db_path)
+        assert rp.phase == PHASE_ETAT_DES_LIEUX

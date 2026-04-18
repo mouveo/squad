@@ -746,3 +746,245 @@ class TestReviewRejectAction:
         refreshed = _get(session.id, db_path=db_path)
         assert refreshed.status == STATUS_QUEUED
         assert refreshed.failure_reason is None
+
+
+# ── Angle-review actions (LOT 6) ──────────────────────────────────────────────
+
+
+@pytest.fixture
+def ideation_paused_session(db_path, project):
+    """A Slack-aware session paused at ideation with persisted angles."""
+    from squad.constants import PHASE_IDEATION, STATUS_INTERVIEWING
+    from squad.db import (
+        create_session,
+        persist_ideation_angle,
+        update_session_slack_thread,
+        update_session_status,
+    )
+    from squad.models import IdeationAngle
+
+    s = create_session(
+        title="idéation",
+        project_path=str(project),
+        workspace_path=str(project / "ws"),
+        idea="idée",
+        db_path=db_path,
+        slack_channel="C999",
+    )
+    update_session_slack_thread(s.id, "1700000000.1", db_path=db_path)
+    update_session_status(
+        s.id, STATUS_INTERVIEWING, current_phase=PHASE_IDEATION, db_path=db_path
+    )
+    for idx in range(3):
+        persist_ideation_angle(
+            db_path,
+            IdeationAngle(
+                session_id=s.id,
+                idx=idx,
+                title=f"angle {idx}",
+                segment=f"seg {idx}",
+                value_prop=f"vp {idx}",
+                approach=f"ap {idx}",
+                divergence_note=f"div {idx}",
+            ),
+        )
+    from squad.db import get_session
+
+    return get_session(s.id, db_path=db_path)
+
+
+def _angle_action_body(
+    session_id: str,
+    *,
+    action_id: str,
+    value: str,
+    message_ts: str = "1700000000.1",
+    channel_id: str = "C999",
+) -> dict:
+    return {
+        "actions": [{"action_id": action_id, "value": value}],
+        "channel": {"id": channel_id},
+        "message": {"ts": message_ts},
+        "trigger_id": "trg1",
+        "user": {"id": "U123"},
+    }
+
+
+class TestHandlePickAngle:
+    def test_persists_selected_idx_updates_card_and_resumes(
+        self, db_path, ideation_paused_session, client, executor
+    ):
+        from squad.db import get_session
+        from squad.slack_handlers import handle_pick_angle
+        from squad.slack_service import ANGLE_PICK_ACTION_ID
+
+        session = ideation_paused_session
+        body = _angle_action_body(
+            session.id,
+            action_id=ANGLE_PICK_ACTION_ID,
+            value=f"{session.id}:2",
+        )
+        handle_pick_angle(
+            body=body, client=client, db_path=db_path, executor=executor
+        )
+        refreshed = get_session(session.id, db_path=db_path)
+        assert refreshed.selected_angle_idx == 2
+        client.chat_update.assert_called_once()
+        assert len(executor.submitted) == 1
+
+    def test_second_click_is_noop(
+        self, db_path, ideation_paused_session, client, executor
+    ):
+        from squad.slack_handlers import handle_pick_angle
+        from squad.slack_service import ANGLE_PICK_ACTION_ID
+
+        session = ideation_paused_session
+        body = _angle_action_body(
+            session.id,
+            action_id=ANGLE_PICK_ACTION_ID,
+            value=f"{session.id}:1",
+        )
+        handle_pick_angle(
+            body=body, client=client, db_path=db_path, executor=executor
+        )
+        # Second click on a different angle — must be ignored (idempotent).
+        body2 = _angle_action_body(
+            session.id,
+            action_id=ANGLE_PICK_ACTION_ID,
+            value=f"{session.id}:2",
+        )
+        handle_pick_angle(
+            body=body2, client=client, db_path=db_path, executor=executor
+        )
+        from squad.db import get_session
+
+        refreshed = get_session(session.id, db_path=db_path)
+        assert refreshed.selected_angle_idx == 1  # unchanged by the 2nd click
+        # Only the first click scheduled a resume.
+        assert len(executor.submitted) == 1
+        # Only the first click triggered a chat_update.
+        assert client.chat_update.call_count == 1
+
+    def test_ignored_when_session_not_interviewing(
+        self, db_path, ideation_paused_session, client, executor
+    ):
+        from squad.constants import STATUS_WORKING
+        from squad.db import get_session, update_session_status
+        from squad.slack_handlers import handle_pick_angle
+        from squad.slack_service import ANGLE_PICK_ACTION_ID
+
+        session = ideation_paused_session
+        update_session_status(session.id, STATUS_WORKING, db_path=db_path)
+        body = _angle_action_body(
+            session.id,
+            action_id=ANGLE_PICK_ACTION_ID,
+            value=f"{session.id}:0",
+        )
+        handle_pick_angle(
+            body=body, client=client, db_path=db_path, executor=executor
+        )
+        refreshed = get_session(session.id, db_path=db_path)
+        assert refreshed.selected_angle_idx is None
+        assert executor.submitted == []
+        client.chat_update.assert_not_called()
+
+    def test_malformed_value_is_ignored(
+        self, db_path, ideation_paused_session, client, executor
+    ):
+        from squad.db import get_session
+        from squad.slack_handlers import handle_pick_angle
+        from squad.slack_service import ANGLE_PICK_ACTION_ID
+
+        session = ideation_paused_session
+        body = _angle_action_body(
+            session.id,
+            action_id=ANGLE_PICK_ACTION_ID,
+            value="garbage-without-colon",
+        )
+        handle_pick_angle(
+            body=body, client=client, db_path=db_path, executor=executor
+        )
+        refreshed = get_session(session.id, db_path=db_path)
+        assert refreshed.selected_angle_idx is None
+        assert executor.submitted == []
+        client.chat_update.assert_not_called()
+
+    def test_missing_actions_block_ignored(
+        self, db_path, ideation_paused_session, client, executor
+    ):
+        from squad.db import get_session
+        from squad.slack_handlers import handle_pick_angle
+
+        session = ideation_paused_session
+        handle_pick_angle(
+            body={"actions": []}, client=client, db_path=db_path, executor=executor
+        )
+        refreshed = get_session(session.id, db_path=db_path)
+        assert refreshed.selected_angle_idx is None
+        assert executor.submitted == []
+
+
+class TestHandlePickAllAngles:
+    def test_sets_benchmark_all_and_selected_idx_zero(
+        self, db_path, ideation_paused_session, client, executor
+    ):
+        from squad.db import get_session
+        from squad.slack_handlers import handle_pick_all_angles
+        from squad.slack_service import ANGLE_PICK_ALL_ACTION_ID
+
+        session = ideation_paused_session
+        body = _angle_action_body(
+            session.id,
+            action_id=ANGLE_PICK_ALL_ACTION_ID,
+            value=session.id,
+        )
+        handle_pick_all_angles(
+            body=body, client=client, db_path=db_path, executor=executor
+        )
+        refreshed = get_session(session.id, db_path=db_path)
+        assert refreshed.benchmark_all_angles is True
+        assert refreshed.selected_angle_idx == 0
+        client.chat_update.assert_called_once()
+        assert len(executor.submitted) == 1
+
+    def test_second_click_noop(
+        self, db_path, ideation_paused_session, client, executor
+    ):
+        from squad.slack_handlers import handle_pick_all_angles
+        from squad.slack_service import ANGLE_PICK_ALL_ACTION_ID
+
+        session = ideation_paused_session
+        body = _angle_action_body(
+            session.id,
+            action_id=ANGLE_PICK_ALL_ACTION_ID,
+            value=session.id,
+        )
+        handle_pick_all_angles(
+            body=body, client=client, db_path=db_path, executor=executor
+        )
+        handle_pick_all_angles(
+            body=body, client=client, db_path=db_path, executor=executor
+        )
+        assert len(executor.submitted) == 1
+        assert client.chat_update.call_count == 1
+
+    def test_malformed_value_ignored(
+        self, db_path, ideation_paused_session, client, executor
+    ):
+        from squad.db import get_session
+        from squad.slack_handlers import handle_pick_all_angles
+        from squad.slack_service import ANGLE_PICK_ALL_ACTION_ID
+
+        session = ideation_paused_session
+        body = _angle_action_body(
+            session.id,
+            action_id=ANGLE_PICK_ALL_ACTION_ID,
+            value="",
+        )
+        handle_pick_all_angles(
+            body=body, client=client, db_path=db_path, executor=executor
+        )
+        refreshed = get_session(session.id, db_path=db_path)
+        assert refreshed.benchmark_all_angles is False
+        assert refreshed.selected_angle_idx is None
+        assert executor.submitted == []

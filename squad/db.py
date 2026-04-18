@@ -9,7 +9,7 @@ from sqlite_utils import Database
 
 from squad.config import get_global_db_path
 from squad.constants import MODE_APPROVAL, STATUS_DONE, STATUS_FAILED
-from squad.models import GeneratedPlan, PhaseOutput, Question, Session
+from squad.models import GeneratedPlan, IdeationAngle, PhaseOutput, Question, Session
 
 # Statuses that mean a session is no longer in progress
 _TERMINAL_STATUSES = (STATUS_DONE, STATUS_FAILED)
@@ -64,6 +64,26 @@ def _to_session(row: dict) -> Session:
         slack_thread_ts=row.get("slack_thread_ts"),
         slack_user_id=row.get("slack_user_id"),
         failure_reason=row.get("failure_reason"),
+        input_richness=row.get("input_richness"),
+        selected_angle_idx=(
+            int(row["selected_angle_idx"])
+            if row.get("selected_angle_idx") is not None
+            else None
+        ),
+        benchmark_all_angles=bool(row.get("benchmark_all_angles") or 0),
+    )
+
+
+def _to_ideation_angle(row: dict) -> IdeationAngle:
+    return IdeationAngle(
+        session_id=row["session_id"],
+        idx=int(row["idx"]),
+        title=row["title"],
+        segment=row["segment"],
+        value_prop=row["value_prop"],
+        approach=row["approach"],
+        divergence_note=row["divergence_note"],
+        created_at=row.get("created_at") or _now(),
     )
 
 
@@ -141,10 +161,25 @@ def ensure_schema(db_path: Path | None = None) -> None:
             "slack_user_id": str,
             # Failure context (Plan 4 — LOT 2)
             "failure_reason": str,
+            # Ideation state (Plan 6 — LOT 1)
+            "input_richness": str,
+            "selected_angle_idx": int,
+            "benchmark_all_angles": int,
         },
         pk="id",
-        not_null={"title", "project_path", "workspace_path", "idea", "status"},
-        defaults={"mode": MODE_APPROVAL, "challenge_retry_count": 0},
+        not_null={
+            "title",
+            "project_path",
+            "workspace_path",
+            "idea",
+            "status",
+            "benchmark_all_angles",
+        },
+        defaults={
+            "mode": MODE_APPROVAL,
+            "challenge_retry_count": 0,
+            "benchmark_all_angles": 0,
+        },
         if_not_exists=True,
     )
     db["sessions"].create_index(["status"], if_not_exists=True)
@@ -167,6 +202,14 @@ def ensure_schema(db_path: Path | None = None) -> None:
             db["sessions"].add_column(col, col_type)
     if "challenge_retry_count" not in session_cols:
         db["sessions"].add_column("challenge_retry_count", int, not_null_default=0)
+
+    # Additive migration for DBs created before Plan 6 LOT 1
+    if "input_richness" not in session_cols:
+        db["sessions"].add_column("input_richness", str)
+    if "selected_angle_idx" not in session_cols:
+        db["sessions"].add_column("selected_angle_idx", int)
+    if "benchmark_all_angles" not in session_cols:
+        db["sessions"].add_column("benchmark_all_angles", int, not_null_default=0)
 
     db["phase_outputs"].create(
         {
@@ -238,6 +281,23 @@ def ensure_schema(db_path: Path | None = None) -> None:
     if "slack_message_ts" not in db["plans"].columns_dict:
         db["plans"].add_column("slack_message_ts", str)
 
+    # Ideation angles (Plan 6 — LOT 1)
+    db["ideation_angles"].create(
+        {
+            "session_id": str,
+            "idx": int,
+            "title": str,
+            "segment": str,
+            "value_prop": str,
+            "approach": str,
+            "divergence_note": str,
+            "created_at": str,
+        },
+        pk=["session_id", "idx"],
+        if_not_exists=True,
+    )
+    db["ideation_angles"].create_index(["session_id"], if_not_exists=True)
+
 
 # ── sessions ───────────────────────────────────────────────────────────────────
 
@@ -278,6 +338,9 @@ def create_session(
         "slack_thread_ts": slack_thread_ts,
         "slack_user_id": slack_user_id,
         "failure_reason": None,
+        "input_richness": None,
+        "selected_angle_idx": None,
+        "benchmark_all_angles": 0,
     }
     db["sessions"].insert(row)
     return _to_session(row)
@@ -658,3 +721,79 @@ def update_plan_slack_message_ts(
     """Persist the Slack review-message ``ts`` for a plan (used by chat_update)."""
     db = _open(db_path)
     db["plans"].update(plan_id, {"slack_message_ts": slack_message_ts})
+
+
+# ── ideation angles (Plan 6 — LOT 1) ──────────────────────────────────────────
+
+
+def persist_ideation_angle(
+    db_path: Path | None,
+    angle: IdeationAngle,
+) -> IdeationAngle:
+    """Insert or replace an ideation angle keyed on ``(session_id, idx)``."""
+    db = _open(db_path)
+    row = {
+        "session_id": angle.session_id,
+        "idx": angle.idx,
+        "title": angle.title,
+        "segment": angle.segment,
+        "value_prop": angle.value_prop,
+        "approach": angle.approach,
+        "divergence_note": angle.divergence_note,
+        "created_at": angle.created_at,
+    }
+    db["ideation_angles"].upsert(row, pk=["session_id", "idx"])
+    return _to_ideation_angle(row)
+
+
+def list_ideation_angles(
+    db_path: Path | None,
+    session_id: str,
+) -> list[IdeationAngle]:
+    """Return all ideation angles for a session, ordered by ``idx``."""
+    db = _open(db_path)
+    rows = db["ideation_angles"].rows_where(
+        "session_id = ?",
+        [session_id],
+        order_by="idx ASC",
+    )
+    return [_to_ideation_angle(dict(r)) for r in rows]
+
+
+def set_selected_angle(
+    db_path: Path | None,
+    session_id: str,
+    idx: int,
+) -> None:
+    """Record which angle the reviewer picked for downstream phases."""
+    db = _open(db_path)
+    db["sessions"].update(
+        session_id,
+        {"selected_angle_idx": idx, "updated_at": _now()},
+    )
+
+
+def set_benchmark_all_angles(
+    db_path: Path | None,
+    session_id: str,
+    value: bool,
+) -> None:
+    """Toggle whether benchmark should cover every angle or only the selected one."""
+    db = _open(db_path)
+    db["sessions"].update(
+        session_id,
+        {"benchmark_all_angles": 1 if value else 0, "updated_at": _now()},
+    )
+
+
+def update_input_richness(
+    db_path: Path | None,
+    session_id: str,
+    value: str,
+) -> None:
+    """Persist the sparse/rich classification produced before ideation runs."""
+    db = _open(db_path)
+    db["sessions"].update(
+        session_id,
+        {"input_richness": value, "updated_at": _now()},
+    )

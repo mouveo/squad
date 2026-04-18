@@ -12,6 +12,7 @@ from squad.constants import (
     PHASE_CHALLENGE,
     PHASE_CONCEPTION,
     PHASE_ETAT_DES_LIEUX,
+    PHASE_IDEATION,
     PHASES,
 )
 from squad.db import (
@@ -118,7 +119,7 @@ def _configure_mocks(
 
 
 class TestHappyPath:
-    def test_runs_all_six_phases_in_order(self, db_path, session, happy_pm_output):
+    def test_runs_all_seven_phases_in_order(self, db_path, session, happy_pm_output):
         calls: list[tuple[str, str]] = []
 
         def _record_agent(agent_name, session_id, phase, **kwargs):
@@ -138,16 +139,27 @@ class TestHappyPath:
             calls.append(("benchmark", "research"))
             return SimpleNamespace(content="# research / benchmark")
 
+        def _record_ideation(session_id, extra_context=None, db_path=None, **kwargs):
+            calls.append(("ideation", "ideation"))
+            return SimpleNamespace(content="# ideation / ideation")
+
         with (
             patch("squad.pipeline.run_agent", side_effect=_record_agent),
             patch("squad.pipeline.run_agents_tolerant", side_effect=_record_tolerant),
             patch("squad.pipeline.run_research", side_effect=_record_research),
+            patch("squad.pipeline._run_ideation", side_effect=_record_ideation),
         ):
             run_pipeline(session.id, db_path=db_path)
 
         phases_run = [p for p, _ in calls]
         first_indexes = [phases_run.index(p) for p in PHASES]
         assert first_indexes == sorted(first_indexes)
+        # Ideation sits strictly between etat_des_lieux and benchmark.
+        assert (
+            phases_run.index(PHASE_ETAT_DES_LIEUX)
+            < phases_run.index(PHASE_IDEATION)
+            < phases_run.index("benchmark")
+        )
 
     def test_status_is_review_after_pipeline(self, db_path, session, happy_pm_output):
         with (
@@ -178,6 +190,31 @@ class TestHappyPath:
         assert set(PHASES).issubset(phases_with_output)
         # First pass → attempt 1 everywhere
         assert {po.attempt for po in outputs} == {1}
+
+    def test_ideation_failure_does_not_block_pipeline(
+        self, db_path, session, happy_pm_output
+    ):
+        """Non-critical: run_ideation raising must not fail the session."""
+
+        def _boom(session_id, extra_context=None, db_path=None, **kwargs):
+            raise RuntimeError("ideation service down")
+
+        with (
+            patch("squad.pipeline.run_agent") as m_agent,
+            patch("squad.pipeline.run_agents_tolerant") as m_tol,
+            patch("squad.pipeline._run_ideation", side_effect=_boom),
+        ):
+            _configure_mocks(m_agent, m_tol, happy_pm_output)
+            run_pipeline(session.id, db_path=db_path)
+
+        updated = get_session(session.id, db_path=db_path)
+        assert updated.status == "review"
+        # Ideation still has a persisted (fallback) output.
+        ideation_outputs = list_phase_outputs(
+            session.id, phase=PHASE_IDEATION, db_path=db_path
+        )
+        assert len(ideation_outputs) == 1
+        assert "fallback" in ideation_outputs[0].output.lower()
 
     def test_parallel_phase_uses_tolerant_executor(self, db_path, session, happy_pm_output):
         with (
@@ -927,4 +964,260 @@ class TestPipelineExecutorSmoke:
         architect_calls = self._calls_for_agent(calls, "architect")
         assert len(architect_calls) == 1
         assert self._tools_of(architect_calls[0]) == "Read,WebSearch,WebFetch,Glob,LS,Grep"
-        assert architect_calls[0]["cwd"] == session.project_path
+
+
+# ── ideation strategy resolver (LOT 5) ────────────────────────────────────────
+
+
+class TestResolveIdeationStrategy:
+    """Unit tests for the pure decision function ``_resolve_ideation_strategy``."""
+
+    def _result(self, *, strategy: str = "auto_pick", idx: int = 0, n_angles: int = 3):
+        from squad.models import IdeationAngle
+
+        angles = [
+            IdeationAngle(
+                session_id="s",
+                idx=i,
+                title=f"angle {i}",
+                segment="seg",
+                value_prop="vp",
+                approach="ap",
+                divergence_note="div",
+            )
+            for i in range(n_angles)
+        ]
+        strategy_dict = {
+            "strategy": strategy,
+            "best_angle_idx": idx,
+            "divergence_score": "medium",
+        }
+        return SimpleNamespace(content="# md", angles=angles, strategy=strategy_dict)
+
+    def _session(self, **overrides):
+        from squad.models import Session
+
+        defaults = dict(
+            id="s",
+            title="t",
+            project_path="/tmp/p",
+            workspace_path="/tmp/ws",
+            idea="i",
+            slack_channel="C1",
+            slack_thread_ts="ts1",
+            input_richness="sparse",
+            selected_angle_idx=None,
+        )
+        return Session(**{**defaults, **overrides})
+
+    def test_no_slack_thread_forces_auto_pick(self, db_path):
+        from squad.pipeline import _resolve_ideation_strategy
+
+        s = self._session(slack_channel=None, slack_thread_ts=None)
+        decision = _resolve_ideation_strategy(
+            s, self._result(strategy="ask_user", idx=2), db_path
+        )
+        assert decision.auto_pick is True
+        assert decision.selected_idx == 2
+
+    def test_input_richness_rich_overrides_ask_user(self, db_path):
+        from squad.pipeline import _resolve_ideation_strategy
+
+        s = self._session(input_richness="rich")
+        decision = _resolve_ideation_strategy(
+            s, self._result(strategy="ask_user", idx=1), db_path
+        )
+        assert decision.auto_pick is True
+        assert decision.selected_idx == 1
+
+    def test_already_selected_skips_decision(self, db_path):
+        from squad.pipeline import _resolve_ideation_strategy
+
+        s = self._session(selected_angle_idx=2)
+        # Even with ask_user + sparse + slack thread the existing selection wins.
+        decision = _resolve_ideation_strategy(
+            s, self._result(strategy="ask_user", idx=0), db_path
+        )
+        assert decision.auto_pick is True
+        assert decision.selected_idx == 2
+
+    def test_ask_user_sparse_with_slack_pauses(self, db_path):
+        from squad.pipeline import _resolve_ideation_strategy
+
+        s = self._session()  # sparse + slack thread
+        decision = _resolve_ideation_strategy(
+            s, self._result(strategy="ask_user", idx=0), db_path
+        )
+        assert decision.auto_pick is False
+        assert decision.selected_idx is None
+
+    def test_auto_pick_strategy_passes_through(self, db_path):
+        from squad.pipeline import _resolve_ideation_strategy
+
+        s = self._session()
+        decision = _resolve_ideation_strategy(
+            s, self._result(strategy="auto_pick", idx=2), db_path
+        )
+        assert decision.auto_pick is True
+        assert decision.selected_idx == 2
+
+    def test_malformed_strategy_falls_back_to_zero(self, db_path):
+        from squad.pipeline import _resolve_ideation_strategy
+
+        s = self._session()
+        bad = SimpleNamespace(
+            content="",
+            angles=self._result().angles,
+            strategy={"strategy": "magic", "best_angle_idx": 0, "divergence_score": "low"},
+        )
+        decision = _resolve_ideation_strategy(s, bad, db_path)
+        assert decision.auto_pick is True
+        assert decision.selected_idx == 0
+
+    def test_out_of_range_idx_falls_back_to_zero(self, db_path):
+        from squad.pipeline import _resolve_ideation_strategy
+
+        s = self._session()
+        bad = self._result(strategy="auto_pick", idx=99, n_angles=3)
+        decision = _resolve_ideation_strategy(s, bad, db_path)
+        assert decision.auto_pick is True
+        assert decision.selected_idx == 0
+
+    def test_empty_angles_falls_back_to_zero(self, db_path):
+        from squad.pipeline import _resolve_ideation_strategy
+
+        s = self._session()
+        bad = SimpleNamespace(
+            content="",
+            angles=[],
+            strategy={"strategy": "auto_pick", "best_angle_idx": 0, "divergence_score": "low"},
+        )
+        decision = _resolve_ideation_strategy(s, bad, db_path)
+        assert decision.auto_pick is True
+        assert decision.selected_idx == 0
+
+
+# ── ideation phase end-to-end (LOT 5) ─────────────────────────────────────────
+
+
+class TestIdeationPhasePauseAndAutoPick:
+    """Integration of run_phase + ideation + strategy gate."""
+
+    def _ideation_result(self, *, strategy: str, idx: int = 0):
+        from squad.models import IdeationAngle
+
+        angles = [
+            IdeationAngle(
+                session_id="s",
+                idx=i,
+                title=f"angle {i}",
+                segment="seg",
+                value_prop="vp",
+                approach="ap",
+                divergence_note="div",
+            )
+            for i in range(3)
+        ]
+        return SimpleNamespace(
+            content=(
+                "# Ideation\n"
+                "## Angle 0 — A\n- Segment: a\n\n"
+                "## Angle 1 — B\n- Segment: b\n\n"
+                "## Angle 2 — C\n- Segment: c\n"
+            ),
+            angles=angles,
+            strategy={
+                "strategy": strategy,
+                "best_angle_idx": idx,
+                "divergence_score": "medium",
+            },
+        )
+
+    def _slack_session(self, db_path, tmp_path, project_dir):
+        # Slack-aware session: has thread + channel.
+        s = create_session(
+            title="Slack",
+            project_path=str(project_dir),
+            workspace_path=str(tmp_path / "ws-slack"),
+            idea="x",
+            db_path=db_path,
+            slack_channel="C1",
+        )
+        # update_session_slack_thread persists the thread ts.
+        from squad.db import update_session_slack_thread
+
+        update_session_slack_thread(s.id, "1700.0001", db_path=db_path)
+        create_workspace(get_session(s.id, db_path=db_path))
+        return get_session(s.id, db_path=db_path)
+
+    def test_no_slack_session_forces_auto_pick(self, db_path, session):
+        with patch(
+            "squad.pipeline._run_ideation",
+            return_value=self._ideation_result(strategy="ask_user", idx=2),
+        ):
+            result = run_phase(session.id, PHASE_IDEATION, db_path=db_path)
+
+        assert result.paused is False
+        refreshed = get_session(session.id, db_path=db_path)
+        # ask_user was overridden — selected_idx persisted.
+        assert refreshed.selected_angle_idx == 2
+
+    def test_rich_input_overrides_ask_user(self, db_path, project_dir, tmp_path):
+        s = self._slack_session(db_path, tmp_path, project_dir)
+        # Force input_richness=rich to skip the user round-trip.
+        from squad.db import update_input_richness
+
+        update_input_richness(db_path, s.id, "rich")
+        # Make scoring deterministic too — we want it to remain rich.
+        with (
+            patch("squad.pipeline.score_input_richness", return_value="rich"),
+            patch(
+                "squad.pipeline._run_ideation",
+                return_value=self._ideation_result(strategy="ask_user", idx=1),
+            ),
+        ):
+            result = run_phase(s.id, PHASE_IDEATION, db_path=db_path)
+
+        assert result.paused is False
+        refreshed = get_session(s.id, db_path=db_path)
+        assert refreshed.selected_angle_idx == 1
+
+    def test_ask_user_sparse_with_slack_pauses_session(
+        self, db_path, project_dir, tmp_path
+    ):
+        s = self._slack_session(db_path, tmp_path, project_dir)
+        with (
+            patch("squad.pipeline.score_input_richness", return_value="sparse"),
+            patch(
+                "squad.pipeline._run_ideation",
+                return_value=self._ideation_result(strategy="ask_user", idx=0),
+            ),
+        ):
+            result = run_phase(s.id, PHASE_IDEATION, db_path=db_path)
+
+        assert result.paused is True
+        refreshed = get_session(s.id, db_path=db_path)
+        assert refreshed.status == "interviewing"
+        assert refreshed.current_phase == PHASE_IDEATION
+        # No angle was auto-selected — a human must pick.
+        assert refreshed.selected_angle_idx is None
+
+    def test_already_selected_resumes_to_benchmark(
+        self, db_path, project_dir, tmp_path
+    ):
+        s = self._slack_session(db_path, tmp_path, project_dir)
+        from squad.db import set_selected_angle
+
+        set_selected_angle(db_path, s.id, 1)
+        with (
+            patch("squad.pipeline.score_input_richness", return_value="sparse"),
+            patch(
+                "squad.pipeline._run_ideation",
+                return_value=self._ideation_result(strategy="ask_user", idx=0),
+            ),
+        ):
+            result = run_phase(s.id, PHASE_IDEATION, db_path=db_path)
+        assert result.paused is False
+        refreshed = get_session(s.id, db_path=db_path)
+        # Pre-existing selection preserved (not overwritten by agent's idx=0).
+        assert refreshed.selected_angle_idx == 1

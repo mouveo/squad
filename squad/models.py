@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Literal
 
 from squad.constants import (
     MODE_APPROVAL,
@@ -75,6 +76,10 @@ class Session:
     slack_user_id: str | None = None
     # Persisted failure explanation (pipeline crash or human rejection)
     failure_reason: str | None = None
+    # Ideation-phase state (Plan 6 — LOT 1)
+    input_richness: Literal["sparse", "rich"] | None = None
+    selected_angle_idx: int | None = None
+    benchmark_all_angles: bool = False
 
     def __post_init__(self) -> None:
         if self.status not in SESSION_STATUSES:
@@ -214,3 +219,30 @@ class PipelineEvent:
     def __post_init__(self) -> None:
         if self.type not in PIPELINE_EVENT_TYPES:
             raise ValueError(f"Invalid pipeline event type: {self.type!r}")
+
+
+# ── Ideation angles (Plan 6 — LOT 1) ──────────────────────────────────────────
+
+
+def _ideation_now() -> str:
+    return datetime.utcnow().isoformat()
+
+
+@dataclass
+class IdeationAngle:
+    """One divergent angle produced by the ``ideation`` phase.
+
+    Persisted in the ``ideation_angles`` table keyed on
+    ``(session_id, idx)`` with ``idx`` 0-based. ``created_at`` is an
+    ISO-8601 string, matching the timestamp format used elsewhere in
+    the DB layer so the parser can rebuild complete rows.
+    """
+
+    session_id: str
+    idx: int
+    title: str
+    segment: str
+    value_prop: str
+    approach: str
+    divergence_note: str
+    created_at: str = field(default_factory=_ideation_now)

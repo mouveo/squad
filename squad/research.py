@@ -166,6 +166,9 @@ def build_research_prompt(
     budget: ResearchBudget,
     extra_context: str | None = None,
     protocol: str | None = None,
+    *,
+    input_richness: str | None = None,
+    benchmark_all_angles: bool = False,
 ) -> str:
     """Build the single research prompt sent to Claude.
 
@@ -173,6 +176,12 @@ def build_research_prompt(
     ``extra_context`` first, then the protocol, then the full prompt as
     a last resort. The structure of the requested output is fixed so
     downstream summarisation in the context builder can rely on it.
+
+    ``input_richness="rich"`` flips the prompt into "cover the gaps"
+    mode (directive forbidding generic research restart). ``benchmark_
+    all_angles=True`` instructs the agent to deliver a single report
+    spanning every angle, mutualising findings and avoiding duplicate
+    research between axes.
     """
     axes_block = "\n".join(f"{idx + 1}. {axis}" for idx, axis in enumerate(axes))
     context_block = (extra_context or "").strip()
@@ -183,6 +192,25 @@ def build_research_prompt(
         "pipeline. Produce ONE markdown report that is structured, "
         "concise, and fully sourced.\n\n"
     )
+    directives: list[str] = []
+    if (input_richness or "").lower() == "rich":
+        directives.append(
+            "## Posture\n"
+            "L'utilisateur a déjà fourni un contexte riche. Ton job n'est "
+            "pas de refaire une recherche généraliste mais de combler les "
+            "angles morts : vérifier les points non couverts, challenger "
+            "les chiffres, et identifier les alternatives absentes.\n"
+        )
+    if benchmark_all_angles:
+        directives.append(
+            "## Couverture multi-angles\n"
+            "Produis UN SEUL rapport benchmark couvrant tous les angles "
+            "issus de la phase d'idéation. Mutualise les findings communs "
+            "entre angles et évite de dupliquer les recherches : chaque "
+            "source consultée doit être capitalisée pour tous les angles "
+            "pertinents.\n"
+        )
+    directives_block = "\n".join(directives)
     body = (
         f"## Idea\n{idea}\n\n"
         f"## Research axes (cover each one)\n{axes_block}\n\n"
@@ -207,7 +235,8 @@ def build_research_prompt(
     def _assemble(ctx: str, proto: str) -> str:
         protocol_section = f"## Research protocol\n{proto}\n\n" if proto else ""
         context_section = f"## Additional context\n{ctx}\n\n" if ctx else ""
-        return header + protocol_section + context_section + body
+        directives_section = f"{directives_block}\n" if directives_block else ""
+        return header + directives_section + protocol_section + context_section + body
 
     prompt = _assemble(context_block, protocol_block)
     if len(prompt) <= budget.max_prompt_chars:
@@ -330,6 +359,8 @@ def run_research(
         budget=budget,
         extra_context=extra_context,
         protocol=protocol,
+        input_richness=session.input_richness,
+        benchmark_all_angles=bool(session.benchmark_all_angles),
     )
 
     logger.info(
@@ -339,10 +370,12 @@ def run_research(
         len(axes),
         budget.max_output_chars,
     )
+    cwd = _resolve_project_cwd(session)
     raw = run_task_text(
         prompt,
         timeout=budget.timeout_seconds,
         allowed_tools=list(RESEARCH_TOOLS),
+        cwd=cwd,
     )
     content = _truncate_output(raw, budget)
 
@@ -358,6 +391,26 @@ def run_research(
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
+
+
+def _resolve_project_cwd(session) -> str | None:
+    """Return ``session.project_path`` as the Claude subprocess cwd, if safe.
+
+    Mirrors ``pipeline._resolve_agent_cwd``: only returns a path when it
+    exists on disk, otherwise logs a warning and falls back to ``None``
+    so the benchmark still runs (just without active-exploration tools
+    resolving against the real project).
+    """
+    project_path = getattr(session, "project_path", None)
+    if not project_path:
+        return None
+    if not Path(project_path).exists():
+        logger.warning(
+            "run_research: session.project_path %r does not exist; falling back to cwd=None",
+            project_path,
+        )
+        return None
+    return project_path
 
 
 def _derive_slug(idea: str, max_len: int = 40) -> str:
