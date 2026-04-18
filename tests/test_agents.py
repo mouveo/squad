@@ -35,8 +35,11 @@ REQUIRED_SECTIONS = [
 
 CAPABILITIES = list(AGENT_CAPABILITIES)
 
-# Patterns that would indicate a placeholder was left unreplaced
-PLACEHOLDER_PATTERN = re.compile(r"\{[^}]+\}")
+# Patterns that would indicate a placeholder was left unreplaced.
+# Restrict to single-token placeholders (``{variable_name}``) so agent
+# markdowns can include legitimate JSON example blocks (which contain
+# arbitrary ``{"key": "value"}`` literals) without tripping the check.
+PLACEHOLDER_PATTERN = re.compile(r"\{[a-zA-Z_][a-zA-Z0-9_]*\}")
 
 
 def _read(filename: str) -> str:

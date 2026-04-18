@@ -21,6 +21,8 @@ from squad.db import (
     get_session,
     list_pending_questions,
     list_phase_outputs,
+    mark_phase_skipped,
+    update_session_profile,
     update_session_status,
 )
 from squad.executor import AgentError
@@ -61,7 +63,17 @@ def session(db_path: Path, tmp_path: Path, project_dir: Path):
         db_path=db_path,
     )
     create_workspace(s)
-    return s
+    # Pre-seed the subject profile so existing pipeline tests exercise
+    # the happy path without triggering the real Claude classifier when
+    # the pipeline's ``_ensure_subject_profile`` helper runs.
+    update_session_profile(
+        session_id=s.id,
+        subject_type="generic",
+        research_depth="normal",
+        agents_by_phase={},
+        db_path=db_path,
+    )
+    return get_session(s.id, db_path=db_path) or s
 
 
 @pytest.fixture
@@ -84,6 +96,26 @@ def _stub_plan_generation():
     Here the focus is on phase orchestration.
     """
     with patch("squad.pipeline._generate_and_copy_plans", return_value=None):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _stub_run_research():
+    """Stub ``squad.pipeline.run_research`` so the benchmark phase never
+    invokes the real Claude CLI. Individual tests that want to exercise
+    research wiring can still override this by patching inside a ``with``
+    block — the inner patch wins.
+
+    ``run_research`` is imported into the ``squad.pipeline`` namespace,
+    so patching it there covers every pipeline code path that dispatches
+    the benchmark phase.
+    """
+    from types import SimpleNamespace
+
+    def _fake(session_id, extra_context=None, db_path=None, **kwargs):
+        return SimpleNamespace(content=f"# research / benchmark for {session_id}")
+
+    with patch("squad.pipeline.run_research", side_effect=_fake):
         yield
 
 
@@ -650,6 +682,149 @@ class TestEventCallback:
         persisted = get_session(session.id, db_path=db_path)
         assert persisted.status == "failed"
         assert "Plan generation failed" in (persisted.failure_reason or "")
+
+
+# ── Synthese contract retry (LOT 4 — Plan 7) ──────────────────────────────────
+
+
+class TestSyntheseContractRetry:
+    def test_invalid_contract_triggers_synthese_retry_and_recovers(
+        self, db_path, session, happy_pm_output
+    ):
+        """First plan gen raises invalid-contract → synthese rerun → second gen succeeds."""
+        from squad.plan_generator import InvalidSynthesisContractError
+
+        call_count = {"gen": 0}
+
+        def _gen(session_id, db_path=None):
+            call_count["gen"] += 1
+            if call_count["gen"] == 1:
+                raise InvalidSynthesisContractError(
+                    "bad contract",
+                    last_output_path="/abs/synthese-1.md",
+                )
+            return None
+
+        with (
+            patch("squad.pipeline.run_agent") as m_agent,
+            patch("squad.pipeline.run_agents_tolerant") as m_tol,
+            patch("squad.pipeline._generate_and_copy_plans", side_effect=_gen),
+        ):
+            _configure_mocks(m_agent, m_tol, happy_pm_output)
+            run_pipeline(session.id, db_path=db_path)
+
+        # Plan generation was attempted exactly twice — retry happened.
+        assert call_count["gen"] == 2
+        # Session landed in review (retry succeeded).
+        updated = get_session(session.id, db_path=db_path)
+        assert updated.status == "review"
+        # A second synthese attempt was persisted.
+        synthese_outputs = list_phase_outputs(
+            session.id, phase="synthese", db_path=db_path
+        )
+        assert {po.attempt for po in synthese_outputs} == {1, 2}
+
+    def test_retry_passes_phase_instruction_to_synthese_rerun(
+        self, db_path, session, happy_pm_output
+    ):
+        """The synthese rerun must receive an explicit reformat instruction."""
+        from squad.plan_generator import InvalidSynthesisContractError
+
+        call_count = {"gen": 0}
+        captured_instructions: list = []
+
+        def _gen(session_id, db_path=None):
+            call_count["gen"] += 1
+            if call_count["gen"] == 1:
+                raise InvalidSynthesisContractError("bad", last_output_path="/x.md")
+            return None
+
+        def _agent(agent_name, session_id, phase, **kwargs):
+            if phase == "synthese":
+                captured_instructions.append(kwargs.get("phase_instruction"))
+            return happy_pm_output if agent_name == "pm" else f"# {agent_name} / {phase}"
+
+        with (
+            patch("squad.pipeline.run_agent", side_effect=_agent),
+            patch("squad.pipeline.run_agents_tolerant") as m_tol,
+            patch("squad.pipeline._generate_and_copy_plans", side_effect=_gen),
+        ):
+
+            def _tolerant(agents_list, session_id, phase, **kwargs):
+                return {a: f"# {a} / {phase}" for a in agents_list}, {}
+
+            m_tol.side_effect = _tolerant
+            run_pipeline(session.id, db_path=db_path)
+
+        # Two synthese calls: first from the main loop (no instruction),
+        # second from the retry (with the reformat instruction).
+        assert len(captured_instructions) == 2
+        assert captured_instructions[0] in (None, "")
+        assert captured_instructions[1] is not None
+        assert "contrat JSON" in captured_instructions[1]
+
+    def test_double_contract_failure_fails_session_with_path(
+        self, db_path, session, happy_pm_output
+    ):
+        """If the retry still produces an invalid contract, fail with the raw path."""
+        from squad.models import EVENT_FAILED
+        from squad.plan_generator import InvalidSynthesisContractError
+
+        call_count = {"gen": 0}
+        events = []
+
+        def _gen(session_id, db_path=None):
+            call_count["gen"] += 1
+            raise InvalidSynthesisContractError(
+                "still bad",
+                last_output_path=f"/abs/synthese-{call_count['gen']}.md",
+            )
+
+        with (
+            patch("squad.pipeline.run_agent") as m_agent,
+            patch("squad.pipeline.run_agents_tolerant") as m_tol,
+            patch("squad.pipeline._generate_and_copy_plans", side_effect=_gen),
+        ):
+            _configure_mocks(m_agent, m_tol, happy_pm_output)
+            with pytest.raises(PipelineError) as excinfo:
+                run_pipeline(
+                    session.id, db_path=db_path, event_callback=events.append
+                )
+
+        # Retry happened exactly once (2 total calls), not more.
+        assert call_count["gen"] == 2
+        # The failure message carries the most recent synthese file path.
+        reason = str(excinfo.value)
+        assert "/abs/synthese-2.md" in reason
+        # Persisted failure_reason and event reflect the same path.
+        persisted = get_session(session.id, db_path=db_path)
+        assert persisted.status == "failed"
+        assert "/abs/synthese-2.md" in (persisted.failure_reason or "")
+        failed = [e for e in events if e.type == EVENT_FAILED]
+        assert len(failed) == 1
+        assert "/abs/synthese-2.md" in (failed[0].failure_reason or "")
+
+    def test_non_contract_error_does_not_trigger_synthese_retry(
+        self, db_path, session, happy_pm_output
+    ):
+        """A plain ValueError (e.g. no synthese output) must NOT trigger a retry."""
+        call_count = {"gen": 0}
+
+        def _gen(session_id, db_path=None):
+            call_count["gen"] += 1
+            raise ValueError("No synthese output found")
+
+        with (
+            patch("squad.pipeline.run_agent") as m_agent,
+            patch("squad.pipeline.run_agents_tolerant") as m_tol,
+            patch("squad.pipeline._generate_and_copy_plans", side_effect=_gen),
+        ):
+            _configure_mocks(m_agent, m_tol, happy_pm_output)
+            with pytest.raises(PipelineError):
+                run_pipeline(session.id, db_path=db_path)
+
+        # Only the initial attempt — no retry for generic errors.
+        assert call_count["gen"] == 1
 
 
 # ── cwd routing by agent (LOT 3 — Plan 5) ─────────────────────────────────────
@@ -1221,3 +1396,295 @@ class TestIdeationPhasePauseAndAutoPick:
         refreshed = get_session(s.id, db_path=db_path)
         # Pre-existing selection preserved (not overwritten by agent's idx=0).
         assert refreshed.selected_angle_idx == 1
+
+
+# ── subject profile guarantee (LOT 2 — Plan 7) ────────────────────────────────
+
+
+class TestEnsureSubjectProfile:
+    """Ensure a subject profile exists before any profile-dependent phase."""
+
+    @pytest.fixture
+    def unclassified_session(self, db_path: Path, tmp_path: Path, project_dir: Path):
+        """A session without ``subject_type`` / ``research_depth`` persisted.
+
+        Mirrors a Slack-created session reaching the pipeline before any
+        classification has run.
+        """
+        workspace_path = tmp_path / "workspace-unclassified"
+        s = create_session(
+            title="Unclassified",
+            project_path=str(project_dir),
+            workspace_path=str(workspace_path),
+            idea="build a small landing page",
+            db_path=db_path,
+        )
+        create_workspace(s)
+        return s
+
+    def _stub_detect(self, db_path: Path, *, depth: str, subject_type: str = "generic"):
+        """Patch ``squad.pipeline.detect_and_persist`` to mimic the real one.
+
+        Writes ``subject_type`` / ``research_depth`` and — when the depth
+        is ``light`` — marks the benchmark phase as skipped, exactly like
+        ``squad.subject_detector.detect_and_persist`` does on the happy
+        path. Returns the mock so the test can assert on call count.
+        """
+        from squad.models import SubjectProfile
+
+        def _persist(session_id, use_llm=True, db_path=db_path, **kwargs):
+            update_session_profile(
+                session_id=session_id,
+                subject_type=subject_type,
+                research_depth=depth,
+                agents_by_phase={},
+                db_path=db_path,
+            )
+            if depth == "light":
+                mark_phase_skipped(
+                    session_id=session_id,
+                    phase="benchmark",
+                    reason="research_depth=light",
+                    db_path=db_path,
+                )
+            return SubjectProfile(
+                subject_type=subject_type,
+                research_depth=depth,
+                agents_by_phase={},
+                rationale="stubbed",
+            )
+
+        return MagicMock(side_effect=_persist)
+
+    def test_run_pipeline_classifies_when_profile_missing(
+        self, db_path, unclassified_session, happy_pm_output
+    ):
+        detect = self._stub_detect(db_path, depth="normal")
+
+        with (
+            patch("squad.pipeline.detect_and_persist", detect),
+            patch("squad.pipeline.run_agent") as m_agent,
+            patch("squad.pipeline.run_agents_tolerant") as m_tol,
+            patch(
+                "squad.pipeline.run_research",
+                return_value=SimpleNamespace(content="# research"),
+            ),
+            patch(
+                "squad.pipeline._run_ideation",
+                return_value=SimpleNamespace(
+                    content="# ideation", angles=[], strategy={}
+                ),
+            ),
+        ):
+            _configure_mocks(m_agent, m_tol, happy_pm_output)
+            run_pipeline(unclassified_session.id, db_path=db_path)
+
+        assert detect.called, "detect_and_persist must be called on entry"
+        refreshed = get_session(unclassified_session.id, db_path=db_path)
+        assert refreshed.subject_type == "generic"
+        assert refreshed.research_depth == "normal"
+
+    def test_run_pipeline_skips_classification_when_profile_present(
+        self, db_path, session, happy_pm_output
+    ):
+        """Fixture ``session`` already carries a profile — no classify call."""
+        detect = MagicMock()
+        with (
+            patch("squad.pipeline.detect_and_persist", detect),
+            patch("squad.pipeline.run_agent") as m_agent,
+            patch("squad.pipeline.run_agents_tolerant") as m_tol,
+            patch(
+                "squad.pipeline.run_research",
+                return_value=SimpleNamespace(content="# research"),
+            ),
+            patch(
+                "squad.pipeline._run_ideation",
+                return_value=SimpleNamespace(
+                    content="# ideation", angles=[], strategy={}
+                ),
+            ),
+        ):
+            _configure_mocks(m_agent, m_tol, happy_pm_output)
+            run_pipeline(session.id, db_path=db_path)
+
+        detect.assert_not_called()
+
+    def test_run_phase_benchmark_classifies_when_profile_missing(
+        self, db_path, unclassified_session
+    ):
+        detect = self._stub_detect(db_path, depth="normal")
+
+        with (
+            patch("squad.pipeline.detect_and_persist", detect),
+            patch(
+                "squad.pipeline.run_research",
+                return_value=SimpleNamespace(content="# research"),
+            ) as m_research,
+        ):
+            run_phase(unclassified_session.id, "benchmark", db_path=db_path)
+
+        detect.assert_called_once()
+        m_research.assert_called_once()
+        refreshed = get_session(unclassified_session.id, db_path=db_path)
+        assert refreshed.research_depth == "normal"
+
+    def test_run_phase_cadrage_does_not_classify(
+        self, db_path, unclassified_session, happy_pm_output
+    ):
+        """Cadrage is not profile-dependent — must not trigger classification."""
+        detect = MagicMock()
+        with (
+            patch("squad.pipeline.detect_and_persist", detect),
+            patch("squad.pipeline.run_agent", return_value=happy_pm_output),
+        ):
+            run_phase(unclassified_session.id, PHASE_CADRAGE, db_path=db_path)
+
+        detect.assert_not_called()
+
+
+class TestLightDepthSkipsBenchmark:
+    """A ``light`` subject must skip benchmark without calling run_research."""
+
+    def test_run_phase_benchmark_skipped_for_light_via_mark(
+        self, db_path, session
+    ):
+        """Skip honored via persisted ``skipped_phases`` (as detect_and_persist writes)."""
+        update_session_profile(
+            session_id=session.id,
+            subject_type="generic",
+            research_depth="light",
+            agents_by_phase={},
+            db_path=db_path,
+        )
+        mark_phase_skipped(
+            session_id=session.id,
+            phase="benchmark",
+            reason="research_depth=light",
+            db_path=db_path,
+        )
+
+        with patch("squad.pipeline.run_research") as m_research:
+            result = run_phase(session.id, "benchmark", db_path=db_path)
+
+        m_research.assert_not_called()
+        assert result.outputs == {}
+        assert result.attempt == 0
+
+    def test_run_phase_benchmark_skipped_for_light_via_depth_only(
+        self, db_path, session
+    ):
+        """Skip honored via ``phase_config.should_skip_phase`` even without the mark."""
+        update_session_profile(
+            session_id=session.id,
+            subject_type="generic",
+            research_depth="light",
+            agents_by_phase={},
+            db_path=db_path,
+        )
+        # Intentionally skip mark_phase_skipped — only the depth drives the skip.
+
+        with patch("squad.pipeline.run_research") as m_research:
+            result = run_phase(session.id, "benchmark", db_path=db_path)
+
+        m_research.assert_not_called()
+        assert result.outputs == {}
+
+    def test_run_pipeline_skips_benchmark_for_light(
+        self, db_path, session, happy_pm_output
+    ):
+        update_session_profile(
+            session_id=session.id,
+            subject_type="generic",
+            research_depth="light",
+            agents_by_phase={},
+            db_path=db_path,
+        )
+        mark_phase_skipped(
+            session_id=session.id,
+            phase="benchmark",
+            reason="research_depth=light",
+            db_path=db_path,
+        )
+
+        with (
+            patch("squad.pipeline.run_agent") as m_agent,
+            patch("squad.pipeline.run_agents_tolerant") as m_tol,
+            patch("squad.pipeline.run_research") as m_research,
+            patch(
+                "squad.pipeline._run_ideation",
+                return_value=SimpleNamespace(
+                    content="# ideation", angles=[], strategy={}
+                ),
+            ),
+        ):
+            _configure_mocks(m_agent, m_tol, happy_pm_output)
+            run_pipeline(session.id, db_path=db_path)
+
+        m_research.assert_not_called()
+        updated = get_session(session.id, db_path=db_path)
+        assert updated.status == "review"
+        # Benchmark must have produced no persisted output.
+        bench_outputs = list_phase_outputs(
+            session.id, phase="benchmark", db_path=db_path
+        )
+        assert bench_outputs == []
+
+    def test_unclassified_light_session_classifies_and_skips(
+        self, db_path, tmp_path, project_dir, happy_pm_output
+    ):
+        """Slack-like session: no profile at all → classify to light → skip benchmark."""
+        from squad.models import SubjectProfile
+
+        workspace_path = tmp_path / "ws-slack-light"
+        s = create_session(
+            title="Slack light",
+            project_path=str(project_dir),
+            workspace_path=str(workspace_path),
+            idea="quick CLI tweak",
+            db_path=db_path,
+        )
+        create_workspace(s)
+
+        def _persist_light(session_id, use_llm=True, db_path=db_path, **kwargs):
+            update_session_profile(
+                session_id=session_id,
+                subject_type="generic",
+                research_depth="light",
+                agents_by_phase={},
+                db_path=db_path,
+            )
+            mark_phase_skipped(
+                session_id=session_id,
+                phase="benchmark",
+                reason="research_depth=light",
+                db_path=db_path,
+            )
+            return SubjectProfile(
+                subject_type="generic",
+                research_depth="light",
+                agents_by_phase={},
+                rationale="stub",
+            )
+
+        with (
+            patch(
+                "squad.pipeline.detect_and_persist", side_effect=_persist_light
+            ) as detect,
+            patch("squad.pipeline.run_agent") as m_agent,
+            patch("squad.pipeline.run_agents_tolerant") as m_tol,
+            patch("squad.pipeline.run_research") as m_research,
+            patch(
+                "squad.pipeline._run_ideation",
+                return_value=SimpleNamespace(
+                    content="# ideation", angles=[], strategy={}
+                ),
+            ),
+        ):
+            _configure_mocks(m_agent, m_tol, happy_pm_output)
+            run_pipeline(s.id, db_path=db_path)
+
+        assert detect.called
+        m_research.assert_not_called()
+        refreshed = get_session(s.id, db_path=db_path)
+        assert refreshed.research_depth == "light"
+        assert refreshed.status == "review"

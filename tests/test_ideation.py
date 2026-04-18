@@ -1,5 +1,6 @@
 """Tests for squad/ideation.py — parse_angles, parse_strategy, run_ideation."""
 
+import logging
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,6 +12,7 @@ from squad.db import (
     list_ideation_angles,
 )
 from squad.ideation import (
+    _RETRY_FORMAT_INSTRUCTION,
     IdeationResult,
     parse_angles,
     parse_strategy,
@@ -392,3 +394,209 @@ class TestIdeationResult:
         assert result.content == "# md"
         assert result.angles == angles
         assert result.strategy == {"k": "v"}
+
+
+# ── parse_angles — non-regression on already-tolerated variants ───────────────
+
+
+class TestParseAnglesToleratedVariants:
+    """Freeze the variants the parser already accepts today.
+
+    The parser intentionally tolerates ``##`` / ``###`` headers, bullet
+    (``-``/``*``) and bold field prefixes, and mixed FR/EN labels. These
+    tests pin that contract so a future refactor cannot silently shrink
+    the set of tolerated outputs.
+    """
+
+    def test_star_bullets_accepted(self):
+        md = (
+            "## Angle 0 — Star bullets\n"
+            "* Segment: ops leads\n"
+            "* Value prop: save hours\n"
+            "* Approche: automation\n"
+            "* Note de divergence: segment\n"
+        )
+        angles = parse_angles(md, "sess-1")
+        assert len(angles) == 1
+        assert angles[0].segment == "ops leads"
+        assert angles[0].value_prop == "save hours"
+        assert angles[0].approach == "automation"
+        assert angles[0].divergence_note == "segment"
+
+    def test_english_label_variants_accepted(self):
+        md = (
+            "## Angle 0 — English labels\n"
+            "- Segment: s\n"
+            "- Value proposition: vp en\n"
+            "- Approach: approach en\n"
+            "- Divergence note: div en\n"
+        )
+        angles = parse_angles(md, "sess-1")
+        a = angles[0]
+        assert a.value_prop == "vp en"
+        assert a.approach == "approach en"
+        assert a.divergence_note == "div en"
+
+    def test_french_alternate_labels_accepted(self):
+        md = (
+            "## Angle 0 — FR alt labels\n"
+            "- Segment: seg fr\n"
+            "- Proposition de valeur: vp fr\n"
+            "- Approche technique: app tech\n"
+            "- Divergence: div fr\n"
+        )
+        angles = parse_angles(md, "sess-1")
+        a = angles[0]
+        assert a.value_prop == "vp fr"
+        assert a.approach == "app tech"
+        assert a.divergence_note == "div fr"
+
+    def test_h3_headers_alongside_h2_accepted(self):
+        md = (
+            "### Angle 0 — H3 first\n"
+            "- Segment: a\n\n"
+            "## Angle 1 — H2 second\n"
+            "- Segment: b\n"
+        )
+        angles = parse_angles(md, "sess-1")
+        assert [a.title for a in angles] == ["H3 first", "H2 second"]
+
+    def test_en_dash_separator_accepted(self):
+        md = "## Angle 0 – with en dash\n- Segment: s\n"
+        angles = parse_angles(md, "sess-1")
+        assert angles[0].title == "with en dash"
+
+    def test_hyphen_separator_accepted(self):
+        md = "## Angle 0 - with hyphen\n- Segment: s\n"
+        angles = parse_angles(md, "sess-1")
+        assert angles[0].title == "with hyphen"
+
+    def test_colon_separator_accepted(self):
+        md = "## Angle 0: with colon\n- Segment: s\n"
+        angles = parse_angles(md, "sess-1")
+        assert angles[0].title == "with colon"
+
+    def test_bullet_label_value_with_en_dash_separator(self):
+        md = "## Angle 0 — sep\n- Segment – value with en-dash sep\n"
+        angles = parse_angles(md, "sess-1")
+        assert angles[0].segment == "value with en-dash sep"
+
+
+# ── run_ideation — retry-once + WARNING fallback log ──────────────────────────
+
+
+_UNPARSEABLE_OUTPUT = "# Random output\nno angle header here at all, just prose\n"
+
+
+class TestRunIdeationRetryOnce:
+    def test_retries_once_when_no_angles_on_first_call(self, db_path, session):
+        """First call returns unparseable output → retry must fire exactly once."""
+        calls: list[dict] = []
+
+        def _fake(**kwargs):
+            calls.append(kwargs)
+            # First call: unparseable; second call: nominal angles.
+            if len(calls) == 1:
+                return _UNPARSEABLE_OUTPUT
+            return _NOMINAL_ANGLES_MD
+
+        with patch("squad.ideation.run_agent", side_effect=_fake):
+            result = run_ideation(session.id, db_path=db_path)
+
+        assert len(calls) == 2, "run_agent must be called exactly twice"
+        assert calls[0].get("phase_instruction") in (None, "")
+        assert calls[1].get("phase_instruction") == _RETRY_FORMAT_INSTRUCTION
+        # Second call yielded parseable angles → no fallback.
+        assert len(result.angles) == 3
+
+    def test_retry_phase_instruction_is_explicit(self, db_path, session):
+        """The retry phase_instruction must reference the canonical example."""
+        calls: list[dict] = []
+
+        def _fake(**kwargs):
+            calls.append(kwargs)
+            return _UNPARSEABLE_OUTPUT if len(calls) == 1 else _NOMINAL_ANGLES_MD
+
+        with patch("squad.ideation.run_agent", side_effect=_fake):
+            run_ideation(session.id, db_path=db_path)
+
+        instruction = calls[1].get("phase_instruction") or ""
+        # Narrow checks: the instruction names the example, the angle
+        # header, and the JSON contract keys.
+        assert "Exemple d'output" in instruction
+        assert "## Angle" in instruction
+        assert "strategy" in instruction
+        assert "best_angle_idx" in instruction
+        assert "divergence_score" in instruction
+
+    def test_no_retry_when_first_call_already_yields_angles(self, db_path, session):
+        """Happy path: a single run_agent call, no retry."""
+        calls: list[dict] = []
+
+        def _fake(**kwargs):
+            calls.append(kwargs)
+            return _NOMINAL_ANGLES_MD
+
+        with patch("squad.ideation.run_agent", side_effect=_fake):
+            run_ideation(session.id, db_path=db_path)
+
+        assert len(calls) == 1
+        assert calls[0].get("phase_instruction") in (None, "")
+
+    def test_retry_runs_even_when_first_call_raises(self, db_path, session):
+        """A first-call exception must still trigger the single retry."""
+        calls: list[dict] = []
+
+        def _fake(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise RuntimeError("first call exploded")
+            return _NOMINAL_ANGLES_MD
+
+        with patch("squad.ideation.run_agent", side_effect=_fake):
+            result = run_ideation(session.id, db_path=db_path)
+
+        assert len(calls) == 2
+        assert calls[1].get("phase_instruction") == _RETRY_FORMAT_INSTRUCTION
+        assert len(result.angles) == 3
+
+
+class TestRunIdeationFallbackLog:
+    def test_warning_logged_with_session_id_and_char_count(
+        self, db_path, session, caplog
+    ):
+        """After two unparseable runs, the fallback log must be WARNING with size."""
+
+        def _fake(**kwargs):
+            return _UNPARSEABLE_OUTPUT
+
+        with (
+            caplog.at_level(logging.WARNING, logger="squad.ideation"),
+            patch("squad.ideation.run_agent", side_effect=_fake),
+        ):
+            run_ideation(session.id, db_path=db_path)
+
+        fallback_logs = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING
+            and "retry produced no parseable angles" in r.getMessage()
+        ]
+        assert len(fallback_logs) == 1
+        msg = fallback_logs[0].getMessage()
+        assert session.id in msg
+        # The exact character count of the (unparseable) retry output
+        # must appear in the message so operators can tell "empty" from
+        # "verbose but off-format".
+        assert f"content={len(_UNPARSEABLE_OUTPUT)} chars" in msg
+
+    def test_fallback_still_persists_synthetic_angle(self, db_path, session):
+        def _fake(**kwargs):
+            return _UNPARSEABLE_OUTPUT
+
+        with patch("squad.ideation.run_agent", side_effect=_fake):
+            result = run_ideation(session.id, db_path=db_path)
+
+        assert len(result.angles) == 1
+        assert result.angles[0].session_id == session.id
+        persisted = list_ideation_angles(db_path, session.id)
+        assert len(persisted) == 1

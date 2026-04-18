@@ -59,7 +59,7 @@ DEFAULT_CONFIG_YAML = """\
 mode: approval
 
 # Default Claude model used by the executor.
-# model: claude-opus-4-6
+# model: claude-opus-4-7[1m]
 
 # Root directory scanned for idea → project auto-discovery. When an
 # idea mentions a folder name present under this root (e.g. "Ajouter un
@@ -98,6 +98,13 @@ forge:
 pipeline:
   # Per-agent timeout in seconds.
   # agent_timeout: 900
+  #
+  # Soft budget in characters for the cumulative context injected into
+  # each phase prompt (~15k tokens at 4 chars/token). The context
+  # builder compresses the oldest phase outputs first, then drops their
+  # summaries with an explicit omission marker, and as a last resort
+  # truncates with a `[… contexte tronqué au-delà du budget]` marker.
+  # context_budget_chars: 60000
 """
 
 

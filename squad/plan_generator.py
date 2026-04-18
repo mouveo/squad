@@ -33,6 +33,22 @@ from squad.workspace import write_plan
 
 logger = logging.getLogger(__name__)
 
+
+class InvalidSynthesisContractError(ValueError):
+    """Raised when synthese outputs exist but none yields a valid contract.
+
+    Distinct from the plain "no synthese output yet" error so the pipeline
+    can trigger a targeted retry of the synthese phase instead of failing
+    the session outright. ``last_output_path`` carries the absolute path
+    of the most recent synthese file so operators (or logs) can open the
+    raw output directly.
+    """
+
+    def __init__(self, message: str, *, last_output_path: str | None = None) -> None:
+        super().__init__(message)
+        self.last_output_path = last_output_path
+
+
 # Default Claude timeout for plan generation (plan drafts are compact)
 _PROMPT_TIMEOUT = 600
 
@@ -218,9 +234,13 @@ def generate_plans_from_session(
             last_error = exc
             continue
     if contract is None:
-        raise ValueError(
+        # Point operators at the raw file from the most recent attempt so
+        # they can open the agent output without digging through the DB.
+        last_path = synthese_outputs[-1].file_path if synthese_outputs else None
+        raise InvalidSynthesisContractError(
             "Could not parse a synthesis contract from the synthese outputs"
-            + (f": {last_error}" if last_error else "")
+            + (f": {last_error}" if last_error else ""),
+            last_output_path=last_path,
         )
 
     blockers = collect_blocker_constraints(session_id, db_path=db_path)
@@ -283,6 +303,7 @@ def _extract_plan_title(content: str) -> str | None:
 # Re-export for convenience
 __all__ = [
     "GeneratedPlanDraft",
+    "InvalidSynthesisContractError",
     "build_plan_prompt",
     "copy_plans_to_project",
     "generate_plans",

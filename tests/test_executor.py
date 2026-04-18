@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from squad import executor
 from squad.executor import (
     AgentError,
     _extract_json,
@@ -692,3 +693,38 @@ class TestCwdByAgentRouting:
         mock_run.return_value = "out"
         run_agents_tolerant(["pm"], "sess-1", "cadrage")
         assert mock_run.call_args.kwargs.get("cwd") is None
+
+
+# ── Default model (LOT 1 — Plan 7) ─────────────────────────────────────────────
+
+
+class TestDefaultModel:
+    def test_default_opus_model_constant(self):
+        assert executor._MODEL == "claude-opus-4-7[1m]"
+
+    def test_light_model_constant_unchanged(self):
+        assert executor._MODEL_LIGHT == "claude-sonnet-4-6"
+
+    @patch("squad.executor._call_claude_cli")
+    def test_run_agent_injects_opus_4_7_1m_by_default(self, mock_cli):
+        mock_cli.return_value = _completed(stdout=_ndjson("ok"))
+        run_agent("pm", "sess-1", "cadrage")
+        cmd = mock_cli.call_args[0][0]
+        model_idx = cmd.index("--model")
+        assert cmd[model_idx + 1] == "claude-opus-4-7[1m]"
+
+    @patch("squad.executor._call_claude_cli")
+    def test_run_task_text_defaults_to_opus_4_7_1m(self, mock_cli):
+        mock_cli.return_value = _completed(stdout=_ndjson("ok"))
+        run_task_text("prompt")
+        cmd = mock_cli.call_args[0][0]
+        model_idx = cmd.index("--model")
+        assert cmd[model_idx + 1] == "claude-opus-4-7[1m]"
+
+    @patch("squad.executor._call_claude_cli")
+    def test_run_task_json_defaults_to_opus_4_7_1m(self, mock_cli):
+        mock_cli.return_value = _completed(stdout=_ndjson('{"ok": true}'))
+        run_task_json("prompt")
+        cmd = mock_cli.call_args[0][0]
+        model_idx = cmd.index("--model")
+        assert cmd[model_idx + 1] == "claude-opus-4-7[1m]"

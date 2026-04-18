@@ -283,3 +283,65 @@ class TestSlackConfig:
         loaded = load_config()
         assert loaded["slack"]["bot_token"] == "xoxb-env"
         assert loaded["slack"]["app_token"] == "xapp-env"
+
+
+# ── Pipeline context budget (LOT 5 — Plan 7) ─────────────────────────────────
+
+
+class TestPipelineContextBudget:
+    def test_default_yaml_documents_context_budget_key(self):
+        # The commented-out `context_budget_chars` line documents the
+        # override knob and the default so users know what they're
+        # opting out of when they set their own value.
+        assert "context_budget_chars: 60000" in DEFAULT_CONFIG_YAML
+
+    def test_default_value_readable_via_get_config_value(self, fake_home: Path):
+        # No user config written → get_config_value returns the provided
+        # default, which matches the documented 60000.
+        assert get_config_value("pipeline.context_budget_chars", default=60000) == 60000
+
+    def test_project_override_wins(self, fake_home: Path, tmp_path: Path):
+        cfg = get_global_config_path()
+        cfg.parent.mkdir(parents=True)
+        cfg.write_text("pipeline:\n  context_budget_chars: 30000\n")
+        proj = tmp_path / "p"
+        proj_cfg = get_project_config_path(proj)
+        proj_cfg.parent.mkdir(parents=True)
+        proj_cfg.write_text("pipeline:\n  context_budget_chars: 12000\n")
+        assert (
+            get_config_value(
+                "pipeline.context_budget_chars",
+                project_path=proj,
+                default=60000,
+            )
+            == 12000
+        )
+
+    def test_global_override_visible_when_no_project_override(
+        self, fake_home: Path, tmp_path: Path
+    ):
+        cfg = get_global_config_path()
+        cfg.parent.mkdir(parents=True)
+        cfg.write_text("pipeline:\n  context_budget_chars: 45000\n")
+        proj = tmp_path / "p"
+        assert (
+            get_config_value(
+                "pipeline.context_budget_chars",
+                project_path=proj,
+                default=60000,
+            )
+            == 45000
+        )
+
+
+# ── Default model comment (LOT 1 — Plan 7) ────────────────────────────────────
+
+
+class TestDefaultModelComment:
+    def test_default_yaml_documents_opus_4_7_1m_model(self):
+        # The commented `# model:` line advertises the executor's current
+        # default so users copy-paste the right identifier when uncommenting.
+        assert "# model: claude-opus-4-7[1m]" in DEFAULT_CONFIG_YAML
+
+    def test_default_yaml_does_not_mention_previous_opus_default(self):
+        assert "claude-opus-4-6" not in DEFAULT_CONFIG_YAML
