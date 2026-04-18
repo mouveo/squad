@@ -117,7 +117,7 @@ Voir `docs/ARCHITECTURE.md` pour le contrat entre Squad et Forge.
 
 ## Coût et garde-fous
 
-- **Modèle par défaut** : `claude-opus-4-6`. Les phases légères
+- **Modèle par défaut** : `claude-opus-4-7[1m]`. Les phases légères
   (classification, résumé) basculent sur Sonnet quand c'est possible.
 - **Budget research** : `ResearchBudget` impose un nombre max d'axes
   (3 normal, 5 deep), un cap sur le prompt et la sortie, et un

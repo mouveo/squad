@@ -23,7 +23,7 @@ from squad.constants import (
 logger = logging.getLogger(__name__)
 
 _AGENTS_DIR = Path(__file__).parent.parent / "agents"
-_MODEL = "claude-opus-4-6"
+_MODEL = "claude-opus-4-7[1m]"
 _MODEL_LIGHT = "claude-sonnet-4-6"
 _TIMEOUT = 900  # 15 minutes per agent
 _TIMEOUT_SHORT = 120  # 2 minutes for lightweight classification tasks

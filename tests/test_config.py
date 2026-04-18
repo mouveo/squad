@@ -283,3 +283,16 @@ class TestSlackConfig:
         loaded = load_config()
         assert loaded["slack"]["bot_token"] == "xoxb-env"
         assert loaded["slack"]["app_token"] == "xapp-env"
+
+
+# ── Default model comment (LOT 1 — Plan 7) ────────────────────────────────────
+
+
+class TestDefaultModelComment:
+    def test_default_yaml_documents_opus_4_7_1m_model(self):
+        # The commented `# model:` line advertises the executor's current
+        # default so users copy-paste the right identifier when uncommenting.
+        assert "# model: claude-opus-4-7[1m]" in DEFAULT_CONFIG_YAML
+
+    def test_default_yaml_does_not_mention_previous_opus_default(self):
+        assert "claude-opus-4-6" not in DEFAULT_CONFIG_YAML

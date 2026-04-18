@@ -97,7 +97,7 @@ Squad appelle Claude Code CLI pour exécuter les agents. Voici le pattern standa
 
 ```bash
 claude --print --output-format stream-json \
-  --model claude-opus-4-6 \
+  --model claude-opus-4-7[1m] \
   --allowedTools "WebSearch,WebFetch,Read" \
   --prompt "..."
 ```
@@ -106,7 +106,7 @@ Options importantes :
 - `--print` : mode non-interactif, output sur stdout
 - `--output-format stream-json` : NDJSON pour parser le stream
 - `--allowedTools` : restreindre les outils selon le profil de l'agent
-- `--model` : claude-opus-4-6 par défaut, claude-sonnet-4-6 pour les tâches légères (classification)
+- `--model` : claude-opus-4-7[1m] par défaut, claude-sonnet-4-6 pour les tâches légères (classification)
 
 Le stream NDJSON contient des lignes JSON avec `type: "text"` pour le contenu. Extraire et concaténer toutes les lignes `type: "text"` pour obtenir le résultat final.
 

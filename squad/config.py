@@ -59,7 +59,7 @@ DEFAULT_CONFIG_YAML = """\
 mode: approval
 
 # Default Claude model used by the executor.
-# model: claude-opus-4-6
+# model: claude-opus-4-7[1m]
 
 # Root directory scanned for idea → project auto-discovery. When an
 # idea mentions a folder name present under this root (e.g. "Ajouter un
