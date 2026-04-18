@@ -545,13 +545,43 @@ def approve(session_id: str) -> None:
     show_default=True,
     help="Size of the thread pool used to run pipelines off the Socket Mode thread.",
 )
-def serve(max_workers: int) -> None:
+@click.option(
+    "--log-file",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=lambda: Path.home() / ".squad" / "serve.log",
+    show_default="~/.squad/serve.log",
+    help="File to append rotating logs to (5 MB × 3 backups). Pass an empty string to disable.",
+)
+@click.option(
+    "--no-reconnect",
+    is_flag=True,
+    help="Disable the auto-reconnect supervisor (single-shot handler.start(), for debugging).",
+)
+@click.option(
+    "--heartbeat-minutes",
+    type=int,
+    default=5,
+    show_default=True,
+    help="Liveness heartbeat log period. Pass 0 to disable.",
+)
+def serve(
+    max_workers: int,
+    log_file: Path,
+    no_reconnect: bool,
+    heartbeat_minutes: int,
+) -> None:
     """Start the Slack Socket Mode app (interactive Slack interface).
 
     Requires the optional ``slack`` extra (``pip install -e ".[slack]"``)
     and both ``slack.bot_token`` / ``slack.app_token`` in the config
     (typically fed from ``SQUAD_SLACK_BOT_TOKEN`` and
     ``SQUAD_SLACK_APP_TOKEN``).
+
+    Logs are written to both stdout and a rotating log file (default
+    ``~/.squad/serve.log``). The supervisor auto-reconnects on Socket
+    Mode disconnects with exponential backoff (5s → 10s → ... capped at
+    10min). SIGTERM/SIGINT triggers a clean shutdown that waits for
+    running pipelines before exiting.
     """
     db_path = get_global_db_path()
     ensure_schema(db_path)
@@ -563,8 +593,17 @@ def serve(max_workers: int) -> None:
             "Slack extra not installed — run `pip install -e \".[slack]\"` first."
         ) from exc
 
+    # Empty string on the CLI disables the file handler.
+    effective_log_file: Path | None = log_file if str(log_file) else None
+
     try:
-        run_serve(db_path=db_path, max_workers=max_workers)
+        run_serve(
+            db_path=db_path,
+            max_workers=max_workers,
+            log_file=effective_log_file,
+            reconnect=not no_reconnect,
+            heartbeat_seconds=heartbeat_minutes * 60,
+        )
     except SlackConfigError as exc:
         raise click.ClickException(str(exc)) from exc
 
