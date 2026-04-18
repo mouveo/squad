@@ -2,17 +2,18 @@
 
 import json
 import uuid
+from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 
 from sqlite_utils import Database
 
 from squad.config import get_global_db_path
-from squad.constants import MODE_APPROVAL, STATUS_DONE, STATUS_FAILED
+from squad.constants import MODE_APPROVAL, TERMINAL_STATUSES
 from squad.models import GeneratedPlan, IdeationAngle, PhaseOutput, Question, Session
 
-# Statuses that mean a session is no longer in progress
-_TERMINAL_STATUSES = (STATUS_DONE, STATUS_FAILED)
+# Local tuple form for parameter binding (sqlite-utils uses positional ?).
+_TERMINAL_STATUSES: tuple[str, ...] = tuple(sorted(TERMINAL_STATUSES))
 
 
 def _decode_json(value: str | None, default):
@@ -433,6 +434,62 @@ def list_session_history(
             order_by="created_at DESC",
             limit=limit,
         )
+    return [_to_session(dict(r)) for r in rows]
+
+
+# Sort directives accepted by ``list_sessions``. Kept as an allow-list
+# so callers (notably the dashboard data layer) can never inject an
+# arbitrary ``ORDER BY`` fragment.
+SESSION_SORT_KEYS: dict[str, str] = {
+    "created_at_desc": "created_at DESC",
+    "created_at_asc": "created_at ASC",
+    "updated_at_desc": "updated_at DESC",
+    "updated_at_asc": "updated_at ASC",
+}
+
+
+def list_sessions(
+    status: str | Iterable[str] | None = None,
+    project_path: str | None = None,
+    sort: str = "created_at_desc",
+    limit: int | None = None,
+    db_path: Path | None = None,
+) -> list[Session]:
+    """Return sessions filtered by status and/or project, sorted and limited.
+
+    ``status`` accepts either a single status string or an iterable of
+    allowed values (empty iterables return an empty list). ``sort`` is
+    restricted to ``SESSION_SORT_KEYS`` so no raw SQL fragment reaches
+    the query. This is the primitive the dashboard data layer builds on.
+    """
+    if sort not in SESSION_SORT_KEYS:
+        raise ValueError(f"Unknown sort key: {sort!r}")
+    db = _open(db_path)
+    clauses: list[str] = []
+    params: list = []
+    if status is not None:
+        if isinstance(status, str):
+            clauses.append("status = ?")
+            params.append(status)
+        else:
+            values = list(status)
+            if not values:
+                return []
+            placeholders = ",".join("?" * len(values))
+            clauses.append(f"status IN ({placeholders})")
+            params.extend(values)
+    if project_path is not None:
+        clauses.append("project_path = ?")
+        params.append(str(project_path))
+
+    kwargs: dict = {"order_by": SESSION_SORT_KEYS[sort]}
+    if limit is not None:
+        kwargs["limit"] = limit
+    where = " AND ".join(clauses) if clauses else None
+    if where:
+        rows = db["sessions"].rows_where(where, params, **kwargs)
+    else:
+        rows = db["sessions"].rows_where(**kwargs)
     return [_to_session(dict(r)) for r in rows]
 
 

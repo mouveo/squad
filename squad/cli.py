@@ -1,5 +1,7 @@
 """Squad CLI entry point."""
 
+import subprocess
+import sys
 import uuid
 from pathlib import Path
 
@@ -19,7 +21,6 @@ from squad.constants import (
     MODE_AUTONOMOUS,
     SESSION_MODES,
     STATUS_APPROVED,
-    STATUS_FAILED,
     STATUS_INTERVIEWING,
     STATUS_REVIEW,
 )
@@ -44,6 +45,7 @@ from squad.forge_bridge import (
 from squad.forge_format import validate_plan
 from squad.notifier import notify_fallback_review, notify_queued
 from squad.pipeline import PipelineError, resume_pipeline, run_pipeline
+from squad.review_service import reject_session
 from squad.workspace import (
     create_workspace,
     get_context,
@@ -325,7 +327,7 @@ def _interactive_review_and_submit(session_id: str, title: str, db_path: Path) -
     )
 
     if decision == "n":
-        update_session_status(session_id, STATUS_FAILED, db_path=db_path)
+        reject_session(session_id, "Rejeté via `squad run`", db_path=db_path)
         click.echo(f"Session {session_id} marquée comme failed.")
         return
     if decision == "q":
@@ -476,7 +478,7 @@ def review(session_id: str, action: str) -> None:
         return
 
     if action == "reject":
-        update_session_status(session_id, STATUS_FAILED, db_path=db_path)
+        reject_session(session_id, "Rejeté via `squad review --action reject`", db_path=db_path)
         click.echo(f"Session {session_id} marked as failed.")
         return
 
@@ -606,6 +608,48 @@ def serve(
         )
     except SlackConfigError as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+@cli.command()
+@click.option(
+    "--host",
+    default="127.0.0.1",
+    show_default=True,
+    help="Network interface Streamlit binds to (local only by default).",
+)
+@click.option(
+    "--port",
+    default=8501,
+    show_default=True,
+    type=int,
+    help="TCP port the dashboard listens on.",
+)
+def dashboard(host: str, port: int) -> None:
+    """Launch the local Streamlit dashboard (optional `dashboard` extra)."""
+    try:
+        import streamlit  # noqa: F401
+    except ImportError as exc:
+        raise click.ClickException(
+            'Dashboard extra not installed — run pip install -e ".[dashboard]" first.'
+        ) from exc
+
+    app_path = Path(__file__).parent / "dashboard" / "app.py"
+    cmd = [
+        sys.executable,
+        "-m",
+        "streamlit",
+        "run",
+        str(app_path),
+        "--server.address",
+        host,
+        "--server.port",
+        str(port),
+        "--server.headless",
+        "true",
+        "--browser.gatherUsageStats",
+        "false",
+    ]
+    subprocess.run(cmd, check=False)
 
 
 @cli.command()

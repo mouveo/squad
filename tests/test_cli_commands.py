@@ -401,7 +401,28 @@ class TestReviewCommand:
             )
         from squad.db import get_session as _get
 
-        assert _get(session.id, db_path=db_path).status == "failed"
+        refreshed = _get(session.id, db_path=db_path)
+        assert refreshed.status == "failed"
+        # Rejection reason must be persisted via the shared service.
+        assert refreshed.failure_reason is not None
+        assert refreshed.failure_reason != ""
+
+    def test_reject_uses_shared_reject_service(self, runner, db_path, project_dir):
+        session = _prepare_session_with_plans(runner, db_path, project_dir)
+        with (
+            patch("squad.cli.get_global_db_path", return_value=db_path),
+            patch("squad.cli.reject_session") as m_reject,
+        ):
+            runner.invoke(
+                cli,
+                ["review", session.id, "--action", "reject"],
+                catch_exceptions=False,
+            )
+        m_reject.assert_called_once()
+        args, kwargs = m_reject.call_args
+        assert args[0] == session.id
+        assert isinstance(args[1], str) and args[1]
+        assert kwargs["db_path"] == db_path
 
     def test_edit_valid_persists_changes(self, runner, db_path, project_dir):
         session = _prepare_session_with_plans(runner, db_path, project_dir)
@@ -620,6 +641,72 @@ class TestInitCommand:
 # ── squad serve (LOT 1 — Plan 4) ──────────────────────────────────────────────
 
 
+class TestDashboardCommand:
+    def test_missing_streamlit_fails_with_clear_error(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Force `import streamlit` to fail regardless of whether the extra
+        # is actually installed in the test environment.
+        import sys as _sys
+
+        monkeypatch.setitem(_sys.modules, "streamlit", None)
+        result = runner.invoke(cli, ["dashboard"], catch_exceptions=False)
+        assert result.exit_code != 0
+        assert "Dashboard extra not installed" in result.output
+        assert 'pip install -e ".[dashboard]"' in result.output
+
+    def test_launch_uses_streamlit_subprocess_with_defaults(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ):
+        import sys as _sys
+        import types
+
+        fake_streamlit = types.ModuleType("streamlit")
+        monkeypatch.setitem(_sys.modules, "streamlit", fake_streamlit)
+
+        captured: dict = {}
+
+        def _fake_run(cmd, check=False):
+            captured["cmd"] = cmd
+            return None
+
+        with patch("squad.cli.subprocess.run", side_effect=_fake_run):
+            result = runner.invoke(cli, ["dashboard"], catch_exceptions=False)
+        assert result.exit_code == 0
+        cmd = captured["cmd"]
+        assert cmd[0] == _sys.executable
+        assert cmd[1:4] == ["-m", "streamlit", "run"]
+        assert cmd[4].endswith("squad/dashboard/app.py")
+        assert "--server.address" in cmd
+        assert cmd[cmd.index("--server.address") + 1] == "127.0.0.1"
+        assert "--server.port" in cmd
+        assert cmd[cmd.index("--server.port") + 1] == "8501"
+
+    def test_launch_honors_custom_host_and_port(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ):
+        import sys as _sys
+        import types
+
+        monkeypatch.setitem(_sys.modules, "streamlit", types.ModuleType("streamlit"))
+
+        captured: dict = {}
+
+        def _fake_run(cmd, check=False):
+            captured["cmd"] = cmd
+            return None
+
+        with patch("squad.cli.subprocess.run", side_effect=_fake_run):
+            result = runner.invoke(
+                cli, ["dashboard", "--host", "0.0.0.0", "--port", "9999"],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        cmd = captured["cmd"]
+        assert cmd[cmd.index("--server.address") + 1] == "0.0.0.0"
+        assert cmd[cmd.index("--server.port") + 1] == "9999"
+
+
 class TestServeCommand:
     def test_missing_bot_token_fails_with_clear_error(
         self, runner: CliRunner, db_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -783,10 +870,13 @@ class TestRunCommand:
     def test_approval_review_reject_marks_failed(
         self, runner: CliRunner, db_path: Path, project_dir: Path
     ):
+        from squad.review_service import reject_session as real_reject
+
         with (
             patch("squad.cli.get_global_db_path", return_value=db_path),
             patch("squad.cli.run_pipeline", side_effect=_land_in_review),
             patch("squad.cli.submit_session_to_forge") as m_submit,
+            patch("squad.cli.reject_session", wraps=real_reject) as m_reject,
         ):
             result = runner.invoke(
                 cli,
@@ -796,11 +886,14 @@ class TestRunCommand:
             )
         assert result.exit_code == 0
         m_submit.assert_not_called()
+        m_reject.assert_called_once()
         from squad.db import get_session as _get
         from squad.db import list_session_history as _hist
 
         sess = _hist(db_path=db_path)[0]
-        assert _get(sess.id, db_path=db_path).status == "failed"
+        refreshed = _get(sess.id, db_path=db_path)
+        assert refreshed.status == "failed"
+        assert refreshed.failure_reason
 
     def test_approval_review_quit_keeps_review(
         self, runner: CliRunner, db_path: Path, project_dir: Path

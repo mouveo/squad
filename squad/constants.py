@@ -62,6 +62,41 @@ SESSION_STATUSES: list[str] = [
     STATUS_FAILED,
 ]
 
+# Terminal statuses — a session in one of these is no longer in progress.
+# Single source of truth for "is this session active?" across the DB
+# layer, Slack, CLI and dashboard.
+TERMINAL_STATUSES: frozenset[str] = frozenset({STATUS_DONE, STATUS_FAILED})
+ACTIVE_STATUSES: frozenset[str] = frozenset(
+    s for s in SESSION_STATUSES if s not in TERMINAL_STATUSES
+)
+
+# Human-readable French label for each status (dashboard badges + CLI).
+STATUS_LABELS: dict[str, str] = {
+    STATUS_DRAFT: "Brouillon",
+    STATUS_INTERVIEWING: "Questions",
+    STATUS_WORKING: "En cours",
+    STATUS_REVIEW: "À relire",
+    STATUS_APPROVED: "Approuvé",
+    STATUS_QUEUED: "Forge",
+    STATUS_DONE: "Terminé",
+    STATUS_FAILED: "Échec",
+}
+
+# Semantic tone per status — kept abstract (not a CSS color) so the
+# dashboard can map it to whichever palette Streamlit exposes without
+# re-declaring the taxonomy here. One of:
+# "neutral" | "progress" | "info" | "warning" | "success" | "muted" | "danger".
+STATUS_TONES: dict[str, str] = {
+    STATUS_DRAFT: "neutral",
+    STATUS_INTERVIEWING: "warning",
+    STATUS_WORKING: "progress",
+    STATUS_REVIEW: "info",
+    STATUS_APPROVED: "success",
+    STATUS_QUEUED: "progress",
+    STATUS_DONE: "muted",
+    STATUS_FAILED: "danger",
+}
+
 # Session modes
 MODE_APPROVAL = "approval"
 MODE_AUTONOMOUS = "autonomous"

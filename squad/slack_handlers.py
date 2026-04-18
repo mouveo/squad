@@ -17,7 +17,6 @@ from squad.attachment_service import AttachmentError, download_file, store_attac
 from squad.constants import (
     PHASE_CADRAGE,
     PHASE_IDEATION,
-    STATUS_FAILED,
     STATUS_INTERVIEWING,
     STATUS_REVIEW,
 )
@@ -29,8 +28,6 @@ from squad.db import (
     list_pending_questions,
     set_benchmark_all_angles,
     set_selected_angle,
-    update_session_failure_reason,
-    update_session_status,
 )
 from squad.forge_bridge import (
     ForgeQueueBusy,
@@ -39,6 +36,7 @@ from squad.forge_bridge import (
 )
 from squad.models import EVENT_INTERVIEWING, EVENT_REVIEW, PipelineEvent, Session
 from squad.pipeline import PipelineError, resume_pipeline, run_pipeline
+from squad.review_service import reject_session
 from squad.slack_service import (
     ANGLE_PICK_ACTION_ID,
     ANGLE_PICK_ALL_ACTION_ID,
@@ -834,8 +832,7 @@ def handle_review_reject_submission(
         )
         return
 
-    update_session_failure_reason(session_id, reason, db_path=db_path)
-    update_session_status(session_id, STATUS_FAILED, db_path=db_path)
+    reject_session(session_id, reason, db_path=db_path)
 
     refreshed = get_session(session_id, db_path=db_path) or session
     update_review_message(
