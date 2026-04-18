@@ -10,6 +10,7 @@ responses.
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from pathlib import Path
 
@@ -21,6 +22,8 @@ from squad.db import (
     _to_session,
     create_session,
     list_pending_questions,
+    list_plans,
+    update_plan_slack_message_ts,
     update_question_slack_message_ts,
     update_session_slack_thread,
 )
@@ -29,6 +32,7 @@ from squad.models import (
     EVENT_INTERVIEWING,
     EVENT_REVIEW,
     EVENT_WORKING,
+    GeneratedPlan,
     PipelineEvent,
     Question,
     Session,
@@ -474,3 +478,261 @@ def post_question_ack(
         session,
         f":white_check_mark: Réponse enregistrée pour _{question.agent} / {question.phase}_ :\n> {preview}",
     )
+
+
+# ── Review actions (LOT 5) ────────────────────────────────────────────────────
+
+REVIEW_APPROVE_ACTION_ID = "squad_review_approve"
+REVIEW_REJECT_ACTION_ID = "squad_review_reject"
+REVIEW_REJECT_MODAL_ID = "squad_review_reject_submit"
+REVIEW_REJECT_INPUT_BLOCK_ID = "reject_reason_block"
+REVIEW_REJECT_INPUT_ACTION_ID = "reject_reason_input"
+
+# Final visual state set via ``chat_update`` after the first action.
+REVIEW_STATE_APPROVED = "approved"
+REVIEW_STATE_REJECTED = "rejected"
+REVIEW_STATE_QUEUED = "queued"
+
+_LOT_HEADING_RE = re.compile(r"^##\s*LOT\s+(\d+)\b.*", re.MULTILINE)
+_FILES_LINE_RE = re.compile(r"^\*\*Files\*\*\s*:\s*(.+)$", re.MULTILINE | re.IGNORECASE)
+
+
+def summarize_plan(plan: GeneratedPlan, *, max_files: int = 5) -> dict:
+    """Extract a short review summary from a Forge plan markdown.
+
+    Returns a dict with ``title``, ``lot_count`` and ``files`` (deduped,
+    capped to ``max_files``). Robust to malformed content: missing
+    sections yield empty values rather than raising.
+    """
+    lot_count = len(_LOT_HEADING_RE.findall(plan.content or ""))
+    raw_files: list[str] = []
+    for match in _FILES_LINE_RE.findall(plan.content or ""):
+        for token in match.split(","):
+            token = token.strip().strip("`")
+            if token and token not in raw_files:
+                raw_files.append(token)
+            if len(raw_files) >= max_files * 4:
+                break
+    return {
+        "title": plan.title,
+        "lot_count": lot_count,
+        "files": raw_files[:max_files],
+    }
+
+
+def format_review_summary(summary: dict) -> str:
+    """Render a plan summary as markdown for the review Slack message."""
+    title = summary.get("title") or "Plan"
+    lot_count = summary.get("lot_count") or 0
+    files = summary.get("files") or []
+    lines = [f":clipboard: *{title}* — {lot_count} lot(s)"]
+    if files:
+        listed = ", ".join(f"`{f}`" for f in files)
+        lines.append(f"Fichiers principaux : {listed}")
+    return "\n".join(lines)
+
+
+def _review_action_value(session_id: str, plan_id: str) -> str:
+    """Encode ``session_id`` + ``plan_id`` in a Block Kit action value."""
+    return f"{session_id}:{plan_id}"
+
+
+def parse_review_action_value(value: str) -> tuple[str | None, str | None]:
+    """Decode a review action value into ``(session_id, plan_id)``."""
+    if not value or ":" not in value:
+        return None, None
+    session_id, plan_id = value.split(":", 1)
+    return session_id or None, plan_id or None
+
+
+def build_plan_review_blocks(
+    plan: GeneratedPlan,
+    summary: dict,
+    *,
+    state: str | None = None,
+    final_note: str | None = None,
+) -> list[dict]:
+    """Return the Block Kit payload for a plan review message.
+
+    When ``state`` is None the message carries the active Approve /
+    Reject buttons. Any non-None state (``approved``/``rejected``/
+    ``queued``) switches to a disabled, informational rendering used by
+    ``chat_update`` after the first click.
+    """
+    header = ":mag: *Review Squad* — plan prêt à valider"
+    if state == REVIEW_STATE_APPROVED:
+        header = ":white_check_mark: *Plan approuvé*"
+    elif state == REVIEW_STATE_QUEUED:
+        header = ":rocket: *Plan envoyé à la queue Forge*"
+    elif state == REVIEW_STATE_REJECTED:
+        header = ":x: *Plan rejeté*"
+
+    blocks: list[dict] = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": header}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": format_review_summary(summary)}},
+    ]
+    if final_note:
+        blocks.append(
+            {"type": "context", "elements": [{"type": "mrkdwn", "text": final_note}]}
+        )
+    if state is None:
+        blocks.append(
+            {
+                "type": "actions",
+                "block_id": f"sq_review_{plan.id}",
+                "elements": [
+                    {
+                        "type": "button",
+                        "action_id": REVIEW_APPROVE_ACTION_ID,
+                        "text": {"type": "plain_text", "text": "Approuver"},
+                        "style": "primary",
+                        "value": _review_action_value(plan.session_id, plan.id),
+                    },
+                    {
+                        "type": "button",
+                        "action_id": REVIEW_REJECT_ACTION_ID,
+                        "text": {"type": "plain_text", "text": "Rejeter"},
+                        "style": "danger",
+                        "value": _review_action_value(plan.session_id, plan.id),
+                    },
+                ],
+            }
+        )
+    return blocks
+
+
+def build_reject_modal(session_id: str, plan_id: str) -> dict:
+    """Return the ``views_open`` payload for the reject-reason modal."""
+    return {
+        "type": "modal",
+        "callback_id": REVIEW_REJECT_MODAL_ID,
+        "private_metadata": _review_action_value(session_id, plan_id),
+        "title": {"type": "plain_text", "text": "Rejeter le plan"},
+        "submit": {"type": "plain_text", "text": "Rejeter"},
+        "close": {"type": "plain_text", "text": "Annuler"},
+        "blocks": [
+            {
+                "type": "input",
+                "block_id": REVIEW_REJECT_INPUT_BLOCK_ID,
+                "label": {"type": "plain_text", "text": "Raison du rejet"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": REVIEW_REJECT_INPUT_ACTION_ID,
+                    "multiline": True,
+                },
+            }
+        ],
+    }
+
+
+def extract_reject_reason(view: dict) -> tuple[str | None, str | None, str]:
+    """Return ``(session_id, plan_id, reason)`` from a reject-modal submission."""
+    session_id, plan_id = parse_review_action_value((view or {}).get("private_metadata") or "")
+    state_values = ((view or {}).get("state") or {}).get("values") or {}
+    block = state_values.get(REVIEW_REJECT_INPUT_BLOCK_ID) or {}
+    entry = block.get(REVIEW_REJECT_INPUT_ACTION_ID) or {}
+    reason = (entry.get("value") or "").strip()
+    return session_id, plan_id, reason
+
+
+def upload_plan_markdown(
+    client,
+    session: Session,
+    plan: GeneratedPlan,
+) -> None:
+    """Upload the full plan markdown in the session thread (Slack external flow).
+
+    Uses ``files_upload_v2`` which drives the ``files.getUploadURLExternal``
+    + ``files.completeUploadExternal`` sequence under the hood. Errors are
+    logged and swallowed — the plan is still available in the workspace
+    and the CLI, so Slack upload is a convenience, not a blocker.
+    """
+    if not session.slack_channel or not session.slack_thread_ts:
+        return
+    filename = Path(plan.file_path).name if plan.file_path else f"{plan.title or 'plan'}.md"
+    try:
+        client.files_upload_v2(
+            channel=session.slack_channel,
+            thread_ts=session.slack_thread_ts,
+            filename=filename,
+            content=plan.content or "",
+            title=plan.title,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Plan markdown upload failed for %s", plan.id)
+
+
+def post_plan_for_review(
+    client,
+    session: Session,
+    plan: GeneratedPlan,
+    db_path: Path | None = None,
+) -> str | None:
+    """Post one plan's review card in the thread and upload its markdown.
+
+    Persists the review message ``ts`` on the plan so ``chat_update``
+    can later disable the buttons without needing another lookup.
+    """
+    if not session.slack_channel or not session.slack_thread_ts:
+        return None
+    if plan.slack_message_ts:
+        return plan.slack_message_ts  # already posted
+    summary = summarize_plan(plan)
+    try:
+        response = client.chat_postMessage(
+            channel=session.slack_channel,
+            thread_ts=session.slack_thread_ts,
+            text=f"Review plan : {plan.title}",
+            blocks=build_plan_review_blocks(plan, summary),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to post review card for plan %s", plan.id)
+        return None
+    ts = (
+        response.get("ts")
+        if isinstance(response, dict)
+        else getattr(response, "get", lambda _k: None)("ts")
+    )
+    if ts:
+        update_plan_slack_message_ts(plan.id, ts, db_path=db_path)
+    upload_plan_markdown(client, session, plan)
+    return ts
+
+
+def post_plans_for_review(
+    client,
+    session: Session,
+    db_path: Path | None = None,
+) -> list[str]:
+    """Post every plan review card for a session; return the ``ts`` list."""
+    posted: list[str] = []
+    for plan in list_plans(session.id, db_path=db_path):
+        ts = post_plan_for_review(client, session, plan, db_path=db_path)
+        if ts:
+            posted.append(ts)
+    return posted
+
+
+def update_review_message(
+    client,
+    session: Session,
+    plan: GeneratedPlan,
+    *,
+    state: str,
+    final_note: str | None = None,
+) -> None:
+    """``chat_update`` the review card to its final state (no buttons)."""
+    if not session.slack_channel or not plan.slack_message_ts:
+        return
+    summary = summarize_plan(plan)
+    try:
+        client.chat_update(
+            channel=session.slack_channel,
+            ts=plan.slack_message_ts,
+            text=f"Review plan : {plan.title} — {state}",
+            blocks=build_plan_review_blocks(
+                plan, summary, state=state, final_note=final_note
+            ),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to chat_update review card for plan %s", plan.id)

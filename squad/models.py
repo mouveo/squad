@@ -141,6 +141,8 @@ class GeneratedPlan:
     content: str
     forge_status: str | None = None
     created_at: datetime = field(default_factory=datetime.utcnow)
+    # Slack review-card message id (LOT 5 — used by chat_update)
+    slack_message_ts: str | None = None
 
 
 # ── Slack attachments (Plan 4 — LOT 3) ────────────────────────────────────────

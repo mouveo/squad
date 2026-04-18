@@ -283,6 +283,138 @@ def test_post_pipeline_event_swallows_slack_errors(tmp_path):
     post_pipeline_event(_event(EVENT_WORKING, phase="cadrage"), session, client)
 
 
+class TestReviewHelpers:
+    def _plan(self, **overrides):
+        from squad.models import GeneratedPlan
+
+        defaults = dict(
+            id="plan-1",
+            session_id="sess-1",
+            title="Interface Slack",
+            file_path="/tmp/plans/plan-1.md",
+            content=(
+                "## LOT 1 — Foo\nBody\n"
+                "**Success criteria**:\n- ok\n"
+                "**Files**: `a.py`, `b.py`, `c.py`\n\n"
+                "## LOT 2 — Bar\nBody\n"
+                "**Files**: `b.py`, `d.py`\n"
+            ),
+        )
+        defaults.update(overrides)
+        return GeneratedPlan(**defaults)
+
+    def test_summarize_plan_counts_lots_and_files(self):
+        from squad.slack_service import summarize_plan
+
+        summary = summarize_plan(self._plan())
+        assert summary["title"] == "Interface Slack"
+        assert summary["lot_count"] == 2
+        assert summary["files"] == ["a.py", "b.py", "c.py", "d.py"]
+
+    def test_summarize_plan_tolerates_empty_content(self):
+        from squad.slack_service import summarize_plan
+
+        summary = summarize_plan(self._plan(content=""))
+        assert summary["lot_count"] == 0
+        assert summary["files"] == []
+
+    def test_build_plan_review_blocks_has_two_buttons(self):
+        from squad.slack_service import (
+            REVIEW_APPROVE_ACTION_ID,
+            REVIEW_REJECT_ACTION_ID,
+            build_plan_review_blocks,
+            summarize_plan,
+        )
+
+        plan = self._plan()
+        blocks = build_plan_review_blocks(plan, summarize_plan(plan))
+        actions = [b for b in blocks if b["type"] == "actions"][0]
+        ids = [el["action_id"] for el in actions["elements"]]
+        assert ids == [REVIEW_APPROVE_ACTION_ID, REVIEW_REJECT_ACTION_ID]
+        # Each button encodes session_id:plan_id
+        for el in actions["elements"]:
+            assert el["value"] == "sess-1:plan-1"
+
+    def test_build_plan_review_blocks_disabled_after_state(self):
+        from squad.slack_service import build_plan_review_blocks, summarize_plan
+
+        plan = self._plan()
+        blocks = build_plan_review_blocks(
+            plan, summarize_plan(plan), state="queued", final_note="ok"
+        )
+        assert not any(b["type"] == "actions" for b in blocks)
+
+    def test_parse_review_action_value(self):
+        from squad.slack_service import parse_review_action_value
+
+        assert parse_review_action_value("s1:p1") == ("s1", "p1")
+        assert parse_review_action_value("") == (None, None)
+        assert parse_review_action_value("invalid") == (None, None)
+
+    def test_build_reject_modal_embeds_ids(self):
+        from squad.slack_service import REVIEW_REJECT_MODAL_ID, build_reject_modal
+
+        view = build_reject_modal("sess-1", "plan-1")
+        assert view["callback_id"] == REVIEW_REJECT_MODAL_ID
+        assert view["private_metadata"] == "sess-1:plan-1"
+
+    def test_extract_reject_reason(self):
+        from squad.slack_service import (
+            REVIEW_REJECT_INPUT_ACTION_ID,
+            REVIEW_REJECT_INPUT_BLOCK_ID,
+            extract_reject_reason,
+        )
+
+        view = {
+            "private_metadata": "sess-1:plan-1",
+            "state": {
+                "values": {
+                    REVIEW_REJECT_INPUT_BLOCK_ID: {
+                        REVIEW_REJECT_INPUT_ACTION_ID: {"value": "  not good  "}
+                    }
+                }
+            },
+        }
+        sid, pid, reason = extract_reject_reason(view)
+        assert (sid, pid, reason) == ("sess-1", "plan-1", "not good")
+
+    def test_upload_plan_markdown_uses_external_flow(self, tmp_path):
+        from unittest.mock import MagicMock
+
+        from squad.models import Session
+        from squad.slack_service import upload_plan_markdown
+
+        session = Session(
+            id="s",
+            title="t",
+            project_path="/tmp/p",
+            workspace_path=str(tmp_path),
+            idea="x",
+            slack_channel="C1",
+            slack_thread_ts="1700.0001",
+        )
+        client = MagicMock()
+        upload_plan_markdown(client, session, self._plan())
+        client.files_upload_v2.assert_called_once()
+
+    def test_upload_noop_without_thread(self, tmp_path):
+        from unittest.mock import MagicMock
+
+        from squad.models import Session
+        from squad.slack_service import upload_plan_markdown
+
+        session = Session(
+            id="s",
+            title="t",
+            project_path="/tmp/p",
+            workspace_path=str(tmp_path),
+            idea="x",
+        )
+        client = MagicMock()
+        upload_plan_markdown(client, session, self._plan())
+        client.files_upload_v2.assert_not_called()
+
+
 class TestQuestionBlocks:
     def test_build_question_blocks_includes_button_when_pending(self):
         from squad.models import Question

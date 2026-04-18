@@ -105,6 +105,7 @@ def _to_plan(row: dict) -> GeneratedPlan:
         content=row["content"],
         forge_status=row.get("forge_status"),
         created_at=_dt(row.get("created_at")) or datetime.utcnow(),
+        slack_message_ts=row.get("slack_message_ts"),
     )
 
 
@@ -224,12 +225,18 @@ def ensure_schema(db_path: Path | None = None) -> None:
             "content": str,
             "forge_status": str,
             "created_at": str,
+            # Slack thread message id for the plan's review card (LOT 5 — Plan 4).
+            "slack_message_ts": str,
         },
         pk="id",
         not_null={"session_id", "title", "file_path", "content"},
         if_not_exists=True,
     )
     db["plans"].create_index(["session_id"], if_not_exists=True)
+
+    # Additive migration for DBs created before LOT 5
+    if "slack_message_ts" not in db["plans"].columns_dict:
+        db["plans"].add_column("slack_message_ts", str)
 
 
 # ── sessions ───────────────────────────────────────────────────────────────────
@@ -631,3 +638,23 @@ def list_plans(session_id: str, db_path: Path | None = None) -> list[GeneratedPl
         order_by="created_at ASC",
     )
     return [_to_plan(dict(r)) for r in rows]
+
+
+def get_plan(plan_id: str, db_path: Path | None = None) -> GeneratedPlan | None:
+    """Return a generated plan by ID, or None when missing."""
+    db = _open(db_path)
+    try:
+        row = db["plans"].get(plan_id)
+        return _to_plan(dict(row))
+    except Exception:
+        return None
+
+
+def update_plan_slack_message_ts(
+    plan_id: str,
+    slack_message_ts: str,
+    db_path: Path | None = None,
+) -> None:
+    """Persist the Slack review-message ``ts`` for a plan (used by chat_update)."""
+    db = _open(db_path)
+    db["plans"].update(plan_id, {"slack_message_ts": slack_message_ts})

@@ -28,7 +28,9 @@ from squad.db import (
     list_plans,
     list_session_history,
     mark_phase_skipped,
+    get_plan,
     get_question,
+    update_plan_slack_message_ts,
     update_question_slack_message_ts,
     update_session_failure_reason,
     update_session_profile,
@@ -486,4 +488,34 @@ class TestQuestionSlackMessageTs:
         update_question_slack_message_ts(q.id, "1700000000.000200", db_path=db_path)
         ensure_schema(db_path)
         fetched = get_question(q.id, db_path=db_path)
+        assert fetched.slack_message_ts == "1700000000.000200"
+
+
+# ── plan slack_message_ts (LOT 5 — Plan 4) ────────────────────────────────────
+
+
+class TestPlanSlackMessageTs:
+    def test_default_is_none(self, db_path: Path):
+        s = _session(db_path)
+        plan = create_plan(s.id, "Plan 1", "/tmp/p1.md", "# plan", db_path=db_path)
+        fetched = get_plan(plan.id, db_path=db_path)
+        assert fetched is not None
+        assert fetched.slack_message_ts is None
+
+    def test_update_and_read_back(self, db_path: Path):
+        s = _session(db_path)
+        plan = create_plan(s.id, "Plan 1", "/tmp/p1.md", "# plan", db_path=db_path)
+        update_plan_slack_message_ts(plan.id, "1700000000.000100", db_path=db_path)
+        fetched = get_plan(plan.id, db_path=db_path)
+        assert fetched.slack_message_ts == "1700000000.000100"
+
+    def test_get_plan_unknown_returns_none(self, db_path: Path):
+        assert get_plan("ghost", db_path=db_path) is None
+
+    def test_migration_keeps_existing_rows(self, db_path: Path):
+        s = _session(db_path)
+        plan = create_plan(s.id, "Plan 1", "/tmp/p1.md", "# plan", db_path=db_path)
+        update_plan_slack_message_ts(plan.id, "1700000000.000200", db_path=db_path)
+        ensure_schema(db_path)  # must not reset
+        fetched = get_plan(plan.id, db_path=db_path)
         assert fetched.slack_message_ts == "1700000000.000200"

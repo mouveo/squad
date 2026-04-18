@@ -530,3 +530,219 @@ class TestQuestionSubmission:
         )
         fetched = get_question(questions[0].id, db_path=db_path)
         assert fetched.answer is None
+
+
+# ── Review approve/reject (LOT 5) ─────────────────────────────────────────────
+
+
+from squad.constants import STATUS_FAILED, STATUS_QUEUED, STATUS_REVIEW  # noqa: E402
+from squad.db import (  # noqa: E402
+    create_plan,
+    get_plan,
+    update_plan_slack_message_ts,
+    update_session_status,
+)
+from squad.forge_bridge import (  # noqa: E402
+    ForgeUnavailable,
+    SubmitOutcome,
+)
+from squad.slack_handlers import (  # noqa: E402
+    _approve_bg,
+    handle_review_approve,
+    handle_review_reject_action,
+    handle_review_reject_submission,
+)
+from squad.slack_service import (  # noqa: E402
+    REVIEW_REJECT_INPUT_ACTION_ID,
+    REVIEW_REJECT_INPUT_BLOCK_ID,
+)
+
+
+@pytest.fixture
+def review_session(db_path, config, executor, client):
+    """Create a Squad session in review with one plan posted in Slack."""
+    session = _slack_session(db_path, config, executor, client)
+    update_session_slack_thread(session.id, "1700000000.000100", db_path=db_path)
+    update_session_status(session.id, STATUS_REVIEW, db_path=db_path)
+    plan = create_plan(
+        session.id,
+        "Plan 1",
+        "/tmp/plan-1.md",
+        "## LOT 1 — t\n**Files**: `a.py`\n",
+        db_path=db_path,
+    )
+    # Simulate that a review message was already posted for this plan
+    update_plan_slack_message_ts(plan.id, "1700000000.000200", db_path=db_path)
+    return session, plan
+
+
+def _review_body(session_id: str, plan_id: str) -> dict:
+    return {
+        "trigger_id": "T123",
+        "actions": [{"value": f"{session_id}:{plan_id}"}],
+    }
+
+
+class TestReviewApproveAction:
+    def test_approve_action_submits_to_forge(
+        self, db_path, review_session, executor, client
+    ):
+        session, plan = review_session
+        with patch(
+            "squad.slack_handlers.approve_and_submit",
+            return_value=SubmitOutcome(plans_sent=1, queue_started=True),
+        ) as m_submit:
+            # handle_review_approve schedules _approve_bg on the executor,
+            # which in our inline executor stores the call; we invoke it
+            # manually below to exercise the full path.
+            before = list(executor.submitted)
+            handle_review_approve(
+                body=_review_body(session.id, plan.id),
+                client=client,
+                db_path=db_path,
+                executor=executor,
+            )
+            new_submits = [s for s in executor.submitted if s not in before]
+            approve_submits = [
+                s for s in new_submits if "_approve_bg" in s[0].__name__
+            ]
+            assert len(approve_submits) == 1
+            fn, args, _ = approve_submits[0]
+            fn(*args)
+        m_submit.assert_called_once_with(session.id, db_path=db_path)
+        # Updates posted in Slack
+        update_calls = [
+            c for c in client.chat_update.call_args_list
+            if c.kwargs.get("ts") == "1700000000.000200"
+        ]
+        assert update_calls
+        post_calls = [
+            c for c in client.chat_postMessage.call_args_list
+            if "Approuvé" in c.kwargs.get("text", "")
+        ]
+        assert post_calls
+
+    def test_approve_action_idempotent(self, db_path, review_session, executor, client):
+        session, plan = review_session
+        # First click flips session to queued via approve_and_submit
+        update_session_status(session.id, STATUS_QUEUED, db_path=db_path)
+
+        before = list(executor.submitted)
+        with patch("squad.slack_handlers.approve_and_submit") as m_submit:
+            handle_review_approve(
+                body=_review_body(session.id, plan.id),
+                client=client,
+                db_path=db_path,
+                executor=executor,
+            )
+        # Non-review status → no _approve_bg scheduled, no Forge call
+        new_submits = [s for s in executor.submitted if s not in before]
+        assert [s for s in new_submits if "_approve_bg" in s[0].__name__] == []
+        m_submit.assert_not_called()
+
+    def test_approve_forge_unavailable_falls_back(
+        self, db_path, review_session, executor, client
+    ):
+        session, plan = review_session
+        with patch(
+            "squad.slack_handlers.approve_and_submit",
+            side_effect=ForgeUnavailable("down"),
+        ):
+            _approve_bg(session.id, plan.id, db_path, client)
+        # Fallback message posted in thread
+        post_calls = [
+            c for c in client.chat_postMessage.call_args_list
+            if "Forge indisponible" in c.kwargs.get("text", "")
+        ]
+        assert post_calls
+
+    def test_approve_unknown_session_silently_ignored(
+        self, db_path, executor, client
+    ):
+        before = list(executor.submitted)
+        with patch("squad.slack_handlers.approve_and_submit") as m_submit:
+            handle_review_approve(
+                body=_review_body("ghost", "ghost"),
+                client=client,
+                db_path=db_path,
+                executor=executor,
+            )
+        m_submit.assert_not_called()
+        assert executor.submitted == before
+
+
+class TestReviewRejectAction:
+    def test_reject_action_opens_modal(self, db_path, review_session, client):
+        session, plan = review_session
+        handle_review_reject_action(
+            body=_review_body(session.id, plan.id),
+            client=client,
+            db_path=db_path,
+        )
+        client.views_open.assert_called_once()
+        view = client.views_open.call_args.kwargs["view"]
+        assert view["private_metadata"] == f"{session.id}:{plan.id}"
+
+    def test_reject_ignored_on_non_review_session(
+        self, db_path, review_session, client
+    ):
+        session, plan = review_session
+        update_session_status(session.id, STATUS_QUEUED, db_path=db_path)
+        handle_review_reject_action(
+            body=_review_body(session.id, plan.id),
+            client=client,
+            db_path=db_path,
+        )
+        client.views_open.assert_not_called()
+
+    def test_reject_submission_marks_session_failed(
+        self, db_path, review_session, client
+    ):
+        session, plan = review_session
+        view = {
+            "private_metadata": f"{session.id}:{plan.id}",
+            "state": {
+                "values": {
+                    REVIEW_REJECT_INPUT_BLOCK_ID: {
+                        REVIEW_REJECT_INPUT_ACTION_ID: {
+                            "value": "pas assez de détail"
+                        }
+                    }
+                }
+            },
+        }
+        handle_review_reject_submission(
+            body={}, view=view, client=client, db_path=db_path
+        )
+        from squad.db import get_session as _get
+
+        refreshed = _get(session.id, db_path=db_path)
+        assert refreshed.status == STATUS_FAILED
+        assert refreshed.failure_reason == "pas assez de détail"
+        # Review card updated
+        client.chat_update.assert_called_once()
+
+    def test_reject_submission_idempotent(self, db_path, review_session, client):
+        session, plan = review_session
+        # Pre-flip to queued — should short-circuit
+        update_session_status(session.id, STATUS_QUEUED, db_path=db_path)
+
+        view = {
+            "private_metadata": f"{session.id}:{plan.id}",
+            "state": {
+                "values": {
+                    REVIEW_REJECT_INPUT_BLOCK_ID: {
+                        REVIEW_REJECT_INPUT_ACTION_ID: {"value": "too late"}
+                    }
+                }
+            },
+        }
+        handle_review_reject_submission(
+            body={}, view=view, client=client, db_path=db_path
+        )
+        from squad.db import get_session as _get
+
+        # Session status untouched, failure_reason not overwritten
+        refreshed = _get(session.id, db_path=db_path)
+        assert refreshed.status == STATUS_QUEUED
+        assert refreshed.failure_reason is None

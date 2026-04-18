@@ -14,29 +14,49 @@ from concurrent.futures import Executor
 from pathlib import Path
 
 from squad.attachment_service import AttachmentError, download_file, store_attachment
+from squad.constants import STATUS_FAILED, STATUS_REVIEW
 from squad.db import (
     answer_question,
+    get_plan,
     get_question,
     get_session,
     list_pending_questions,
+    update_session_failure_reason,
+    update_session_status,
 )
-from squad.models import EVENT_INTERVIEWING, PipelineEvent
+from squad.forge_bridge import (
+    ForgeQueueBusy,
+    ForgeUnavailable,
+    approve_and_submit,
+)
+from squad.models import EVENT_INTERVIEWING, EVENT_REVIEW, PipelineEvent
 from squad.pipeline import PipelineError, resume_pipeline, run_pipeline
 from squad.slack_service import (
     QUESTION_ANSWER_ACTION_ID,
     QUESTION_MODAL_CALLBACK_ID,
+    REVIEW_APPROVE_ACTION_ID,
+    REVIEW_REJECT_ACTION_ID,
+    REVIEW_REJECT_MODAL_ID,
+    REVIEW_STATE_APPROVED,
+    REVIEW_STATE_QUEUED,
+    REVIEW_STATE_REJECTED,
     SlackResolutionError,
     build_question_modal,
+    build_reject_modal,
     create_session_from_slack,
     extract_modal_answer,
+    extract_reject_reason,
     find_session_by_thread,
     format_root_message,
+    parse_review_action_value,
     post_pending_questions,
     post_pipeline_event,
+    post_plans_for_review,
     post_question_ack,
     post_thread_message,
     record_thread_ts,
     update_question_message,
+    update_review_message,
 )
 from squad.workspace import sync_pending_questions
 
@@ -59,6 +79,8 @@ def _make_event_callback(client, db_path: Path):
         post_pipeline_event(event, session, client)
         if event.type == EVENT_INTERVIEWING:
             post_pending_questions(client, session, db_path=db_path)
+        elif event.type == EVENT_REVIEW:
+            post_plans_for_review(client, session, db_path=db_path)
 
     return _callback
 
@@ -147,6 +169,28 @@ def register_handlers(
             client=client,
             db_path=db_path,
             executor=executor,
+        )
+
+    @app.action(REVIEW_APPROVE_ACTION_ID)
+    def _handle_review_approve(ack, body, client):
+        ack()
+        handle_review_approve(
+            body=body,
+            client=client,
+            db_path=db_path,
+            executor=executor,
+        )
+
+    @app.action(REVIEW_REJECT_ACTION_ID)
+    def _handle_review_reject(ack, body, client):
+        ack()
+        handle_review_reject_action(body=body, client=client, db_path=db_path)
+
+    @app.view(REVIEW_REJECT_MODAL_ID)
+    def _handle_review_reject_submission(ack, body, view, client):
+        ack()
+        handle_review_reject_submission(
+            body=body, view=view, client=client, db_path=db_path
         )
 
 
@@ -480,3 +524,186 @@ def handle_question_submission(
             db_path,
             event_callback,
         )
+
+
+# ── Review actions (LOT 5) ────────────────────────────────────────────────────
+
+
+def _extract_review_action_value(body: dict) -> tuple[str | None, str | None]:
+    """Return ``(session_id, plan_id)`` from a review action payload."""
+    actions = (body or {}).get("actions") or []
+    if not actions:
+        return None, None
+    return parse_review_action_value(actions[0].get("value") or "")
+
+
+def handle_review_approve(
+    *,
+    body: dict,
+    client,
+    db_path: Path,
+    executor,
+) -> None:
+    """Handle a click on the ``Approuver`` button.
+
+    Guards on the current session status to stay idempotent: anything
+    other than ``review`` (e.g. the session was already approved,
+    queued, or rejected) is a no-op. Submits to Forge on the shared
+    executor so the Socket Mode thread never blocks on the subprocess
+    round-trip.
+    """
+    session_id, plan_id = _extract_review_action_value(body)
+    if not session_id or not plan_id:
+        return
+
+    session = get_session(session_id, db_path=db_path)
+    plan = get_plan(plan_id, db_path=db_path)
+    if session is None or plan is None:
+        return
+
+    # Idempotency guard — only sessions still in review can be acted on.
+    if session.status != STATUS_REVIEW:
+        logger.debug(
+            "Approve ignored for session %s (status=%s)", session_id, session.status
+        )
+        return
+
+    # Dispatch the actual submission off the Socket Mode thread. The
+    # wrapper below owns the status transition and Slack feedback.
+    executor.submit(_approve_bg, session_id, plan_id, db_path, client)
+
+
+def _approve_bg(session_id: str, plan_id: str, db_path: Path, client) -> None:
+    """Background worker for the Approve button.
+
+    Wraps :func:`squad.forge_bridge.approve_and_submit` — the same path
+    the CLI uses for ``squad approve`` — and mirrors the outcome into
+    the session thread (buttons disabled via ``chat_update``, a
+    confirmation or a fallback message).
+    """
+    session = get_session(session_id, db_path=db_path)
+    plan = get_plan(plan_id, db_path=db_path)
+    if session is None or plan is None:
+        return
+
+    try:
+        outcome = approve_and_submit(session_id, db_path=db_path)
+    except (ForgeUnavailable, ForgeQueueBusy, ValueError) as exc:
+        logger.warning("Forge submission failed for session %s: %s", session_id, exc)
+        refreshed = get_session(session_id, db_path=db_path) or session
+        # Session was reverted to review by approve_and_submit — keep the
+        # UI in sync and post the fallback message expected by the CLI.
+        refreshed_plan = get_plan(plan_id, db_path=db_path) or plan
+        update_review_message(
+            client,
+            refreshed,
+            refreshed_plan,
+            state=REVIEW_STATE_REJECTED,
+            final_note=f":warning: Soumission Forge indisponible — session revenue en review ({exc})",
+        )
+        post_thread_message(
+            client,
+            refreshed,
+            (
+                ":warning: *Forge indisponible* — la session est revenue en _review_. "
+                f"Raison : {exc}. Réessayez plus tard ou utilisez `squad approve`."
+            ),
+        )
+        return
+
+    refreshed = get_session(session_id, db_path=db_path) or session
+    refreshed_plan = get_plan(plan_id, db_path=db_path) or plan
+    update_review_message(
+        client,
+        refreshed,
+        refreshed_plan,
+        state=REVIEW_STATE_QUEUED,
+        final_note=(
+            f":rocket: {outcome.plans_sent} plan(s) envoyé(s) à la queue Forge "
+            f"(queue_started={outcome.queue_started})."
+        ),
+    )
+    post_thread_message(
+        client,
+        refreshed,
+        (
+            f":rocket: *Approuvé* — {outcome.plans_sent} plan(s) envoyé(s) à la queue Forge "
+            f"(queue_started={outcome.queue_started})."
+        ),
+    )
+
+
+def handle_review_reject_action(
+    *,
+    body: dict,
+    client,
+    db_path: Path,
+) -> None:
+    """Open the reject-reason modal for a ``Rejeter`` click.
+
+    As for Approve, a session no longer in ``review`` is ignored so a
+    double-click cannot trigger a second modal.
+    """
+    session_id, plan_id = _extract_review_action_value(body)
+    if not session_id or not plan_id:
+        return
+
+    session = get_session(session_id, db_path=db_path)
+    if session is None or session.status != STATUS_REVIEW:
+        return
+
+    trigger_id = (body or {}).get("trigger_id")
+    if not trigger_id:
+        return
+
+    try:
+        client.views_open(
+            trigger_id=trigger_id,
+            view=build_reject_modal(session_id, plan_id),
+        )
+    except Exception:
+        logger.exception("views_open failed for reject modal on session %s", session_id)
+
+
+def handle_review_reject_submission(
+    *,
+    body: dict,
+    view: dict,
+    client,
+    db_path: Path,
+) -> None:
+    """Persist the rejection reason, mark the session as failed, update the UI."""
+    session_id, plan_id, reason = extract_reject_reason(view)
+    if not session_id or not plan_id or not reason:
+        return
+
+    session = get_session(session_id, db_path=db_path)
+    plan = get_plan(plan_id, db_path=db_path)
+    if session is None or plan is None:
+        return
+
+    if session.status != STATUS_REVIEW:
+        # Someone else already closed the review — ignore silently.
+        logger.debug(
+            "Reject submission ignored for session %s (status=%s)",
+            session_id,
+            session.status,
+        )
+        return
+
+    update_session_failure_reason(session_id, reason, db_path=db_path)
+    update_session_status(session_id, STATUS_FAILED, db_path=db_path)
+
+    refreshed = get_session(session_id, db_path=db_path) or session
+    update_review_message(
+        client,
+        refreshed,
+        plan,
+        state=REVIEW_STATE_REJECTED,
+        final_note=f":x: Rejeté — {reason}",
+    )
+    post_thread_message(
+        client,
+        refreshed,
+        f":x: *Session rejetée*\nRaison : {reason}",
+    )
