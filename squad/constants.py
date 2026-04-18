@@ -70,6 +70,9 @@ CAP_WEB_FETCH = "web_fetch"
 CAP_READ_FILES = "read_files"
 CAP_WRITE_FILES = "write_files"
 CAP_EXECUTE_COMMANDS = "execute_commands"
+CAP_GLOB = "glob"
+CAP_LIST_FILES = "list_files"
+CAP_GREP_FILES = "grep_files"
 
 AGENT_CAPABILITIES: list[str] = [
     CAP_WEB_SEARCH,
@@ -77,4 +80,7 @@ AGENT_CAPABILITIES: list[str] = [
     CAP_READ_FILES,
     CAP_WRITE_FILES,
     CAP_EXECUTE_COMMANDS,
+    CAP_GLOB,
+    CAP_LIST_FILES,
+    CAP_GREP_FILES,
 ]

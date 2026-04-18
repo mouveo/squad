@@ -11,7 +11,14 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from squad.constants import CAP_READ_FILES, CAP_WEB_FETCH, CAP_WEB_SEARCH
+from squad.constants import (
+    CAP_GLOB,
+    CAP_GREP_FILES,
+    CAP_LIST_FILES,
+    CAP_READ_FILES,
+    CAP_WEB_FETCH,
+    CAP_WEB_SEARCH,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,11 +28,13 @@ _MODEL_LIGHT = "claude-sonnet-4-6"
 _TIMEOUT = 900  # 15 minutes per agent
 _TIMEOUT_SHORT = 120  # 2 minutes for lightweight classification tasks
 
-# Only the three tools supported at Plan 1 scope
 _CAPABILITY_TO_TOOL: dict[str, str] = {
     CAP_READ_FILES: "Read",
     CAP_WEB_SEARCH: "WebSearch",
     CAP_WEB_FETCH: "WebFetch",
+    CAP_GLOB: "Glob",
+    CAP_LIST_FILES: "LS",
+    CAP_GREP_FILES: "Grep",
 }
 
 
@@ -138,7 +147,11 @@ def _extract_text(ndjson_output: str) -> str:
 # ── subprocess interface ───────────────────────────────────────────────────────
 
 
-def _call_claude_cli(cmd: list[str], timeout: int) -> subprocess.CompletedProcess:
+def _call_claude_cli(
+    cmd: list[str],
+    timeout: int,
+    cwd: str | None = None,
+) -> subprocess.CompletedProcess:
     """Run the Claude CLI subprocess. Isolated here to allow mocking in tests."""
     return subprocess.run(
         cmd,
@@ -146,6 +159,7 @@ def _call_claude_cli(cmd: list[str], timeout: int) -> subprocess.CompletedProces
         text=True,
         timeout=timeout,
         stdin=subprocess.DEVNULL,  # claude --print waits on stdin by default
+        cwd=cwd,
     )
 
 
@@ -198,6 +212,7 @@ def run_agent(
     *,
     cumulative_context: str | None = None,
     phase_instruction: str | None = None,
+    cwd: str | None = None,
 ) -> str:
     """Run a single agent via Claude CLI. Retries once on failure or empty output.
 
@@ -224,7 +239,7 @@ def run_agent(
         if attempt > 0:
             logger.warning("Retrying agent %r (attempt %d/2)", agent_name, attempt + 1)
         try:
-            completed = _call_claude_cli(cmd, timeout=_TIMEOUT)
+            completed = _call_claude_cli(cmd, timeout=_TIMEOUT, cwd=cwd)
             if completed.returncode != 0:
                 last_error = AgentError(
                     f"Agent {agent_name!r} exited with code {completed.returncode}: "
@@ -250,17 +265,21 @@ def run_agents_parallel(
     *,
     cumulative_context: str | None = None,
     phase_instruction: str | None = None,
+    cwd_by_agent: dict[str, str | None] | None = None,
 ) -> dict[str, str]:
     """Run multiple agents concurrently. Raises AgentError if any agent fails.
 
     A shared ``cumulative_context`` or ``phase_instruction`` is forwarded
     to every agent. Per-agent ``context_sections_by_agent`` still applies
     when callers need agent-specific content on top of the shared context.
+    ``cwd_by_agent`` lets callers route a different subprocess working
+    directory per agent (e.g. the active-exploration worktree).
     """
     if not agents_list:
         return {}
 
     context_map = context_sections_by_agent or {}
+    cwd_map = cwd_by_agent or {}
     results: dict[str, str] = {}
     errors: dict[str, str] = {}
 
@@ -274,6 +293,7 @@ def run_agents_parallel(
                 context_map.get(agent),
                 cumulative_context=cumulative_context,
                 phase_instruction=phase_instruction,
+                cwd=cwd_map.get(agent),
             ): agent
             for agent in agents_list
         }
@@ -300,6 +320,7 @@ def run_agents_tolerant(
     *,
     cumulative_context: str | None = None,
     phase_instruction: str | None = None,
+    cwd_by_agent: dict[str, str | None] | None = None,
 ) -> tuple[dict[str, str], dict[str, str]]:
     """Run multiple agents concurrently and always return ``(results, errors)``.
 
@@ -307,12 +328,14 @@ def run_agents_tolerant(
     failure. The orchestration layer is then free to apply
     ``phase_config.is_critical_agent`` and decide whether to continue
     (non-critical failure) or to mark the session as failed (critical
-    failure).
+    failure). ``cwd_by_agent`` routes a per-agent subprocess working
+    directory (e.g. the active-exploration worktree).
     """
     if not agents_list:
         return {}, {}
 
     context_map = context_sections_by_agent or {}
+    cwd_map = cwd_by_agent or {}
     results: dict[str, str] = {}
     errors: dict[str, str] = {}
 
@@ -326,6 +349,7 @@ def run_agents_tolerant(
                 context_map.get(agent),
                 cumulative_context=cumulative_context,
                 phase_instruction=phase_instruction,
+                cwd=cwd_map.get(agent),
             ): agent
             for agent in agents_list
         }
@@ -348,6 +372,7 @@ def run_task_text(
     model: str = _MODEL,
     timeout: int = _TIMEOUT,
     allowed_tools: list[str] | None = None,
+    cwd: str | None = None,
 ) -> str:
     """Run a generic text task via Claude CLI.
 
@@ -368,7 +393,7 @@ def run_task_text(
     """
     cmd = _build_cmd(prompt, allowed_tools or [], model=model)
     try:
-        completed = _call_claude_cli(cmd, timeout=timeout)
+        completed = _call_claude_cli(cmd, timeout=timeout, cwd=cwd)
     except subprocess.TimeoutExpired as exc:
         raise AgentError(f"Task timed out after {timeout}s") from exc
     if completed.returncode != 0:
@@ -384,6 +409,7 @@ def run_task_json(
     model: str = _MODEL,
     timeout: int = _TIMEOUT,
     allowed_tools: list[str] | None = None,
+    cwd: str | None = None,
 ) -> dict:
     """Run a structured task via Claude CLI and parse the JSON response.
 
@@ -403,5 +429,11 @@ def run_task_json(
         AgentError: On execution failure.
         ValueError: If the output cannot be parsed as JSON.
     """
-    text = run_task_text(prompt, model=model, timeout=timeout, allowed_tools=allowed_tools)
+    text = run_task_text(
+        prompt,
+        model=model,
+        timeout=timeout,
+        allowed_tools=allowed_tools,
+        cwd=cwd,
+    )
     return _extract_json(text)

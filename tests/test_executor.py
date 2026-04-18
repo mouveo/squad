@@ -119,6 +119,28 @@ class TestMapAllowedTools:
         tools = map_allowed_tools({"web_search": False, "read_files": False})
         assert tools == []
 
+    def test_glob_maps_to_glob(self):
+        assert map_allowed_tools({"glob": True}) == ["Glob"]
+
+    def test_list_files_maps_to_ls(self):
+        assert map_allowed_tools({"list_files": True}) == ["LS"]
+
+    def test_grep_files_maps_to_grep(self):
+        assert map_allowed_tools({"grep_files": True}) == ["Grep"]
+
+    def test_all_caps_preserve_deterministic_order(self):
+        tools = map_allowed_tools(
+            {
+                "read_files": True,
+                "web_search": True,
+                "web_fetch": True,
+                "glob": True,
+                "list_files": True,
+                "grep_files": True,
+            }
+        )
+        assert tools == ["Read", "WebSearch", "WebFetch", "Glob", "LS", "Grep"]
+
 
 # ── _extract_text ──────────────────────────────────────────────────────────────
 
@@ -455,7 +477,7 @@ class TestRunAgentForwardsPromptParams:
     def test_run_agent_forwards_cumulative_context(self):
         captured: dict = {}
 
-        def _fake_cli(cmd, timeout):
+        def _fake_cli(cmd, timeout, cwd=None):
             # The Claude CLI takes the prompt as the last positional arg.
             captured["prompt"] = cmd[-1]
             return _completed(_ndjson("ok output"), returncode=0)
@@ -476,7 +498,7 @@ class TestRunAgentForwardsPromptParams:
     def test_run_agents_parallel_forwards_shared_context(self):
         captured: list[str] = []
 
-        def _fake_cli(cmd, timeout):
+        def _fake_cli(cmd, timeout, cwd=None):
             captured.append(cmd[-1])
             return _completed(_ndjson("agent ok"), returncode=0)
 
@@ -501,7 +523,7 @@ from squad.executor import run_agents_tolerant  # noqa: E402
 
 class TestRunAgentsTolerant:
     def test_returns_results_and_errors_tuple(self):
-        def _fake(cmd, timeout):
+        def _fake(cmd, timeout, cwd=None):
             return _completed(_ndjson("ok"), returncode=0)
 
         with patch("squad.executor._call_claude_cli", side_effect=_fake):
@@ -510,7 +532,7 @@ class TestRunAgentsTolerant:
         assert errors == {}
 
     def test_partial_failure_returns_both(self):
-        def _fake(cmd, timeout):
+        def _fake(cmd, timeout, cwd=None):
             # Detect the agent from the dedicated "# Agent: <name>" header
             # (the prompt is the last positional arg of the Claude CLI).
             prompt = cmd[-1]
@@ -529,7 +551,7 @@ class TestRunAgentsTolerant:
     def test_forwards_phase_instruction(self):
         captured: list[str] = []
 
-        def _fake(cmd, timeout):
+        def _fake(cmd, timeout, cwd=None):
             captured.append(cmd[-1])
             return _completed(_ndjson("ok"), returncode=0)
 
@@ -544,10 +566,102 @@ class TestRunAgentsTolerant:
         assert any("Retry with X" in p for p in captured)
 
     def test_never_raises_on_agent_failure(self):
-        def _fake(cmd, timeout):
+        def _fake(cmd, timeout, cwd=None):
             return _completed("", returncode=1, stderr="down")
 
         with patch("squad.executor._call_claude_cli", side_effect=_fake):
             results, errors = run_agents_tolerant(["pm", "ux"], "s", "cadrage")
         assert results == {}
         assert set(errors) == {"pm", "ux"}
+
+
+# ── cwd forwarding (LOT 1 — Plan 5) ────────────────────────────────────────────
+
+
+class TestCwdForwarding:
+    @patch("squad.executor._call_claude_cli")
+    def test_run_agent_forwards_cwd_to_cli(self, mock_cli):
+        mock_cli.return_value = _completed(stdout=_ndjson("ok"))
+        run_agent("pm", "sess-1", "cadrage", cwd="/tmp/foo")
+        assert mock_cli.call_args.kwargs["cwd"] == "/tmp/foo"
+
+    @patch("squad.executor._call_claude_cli")
+    def test_run_agent_defaults_cwd_none(self, mock_cli):
+        mock_cli.return_value = _completed(stdout=_ndjson("ok"))
+        run_agent("pm", "sess-1", "cadrage")
+        assert mock_cli.call_args.kwargs["cwd"] is None
+
+    @patch("squad.executor._call_claude_cli")
+    def test_run_task_text_forwards_cwd_and_tools(self, mock_cli):
+        mock_cli.return_value = _completed(stdout=_ndjson("ok"))
+        run_task_text("prompt", cwd="/tmp/foo", allowed_tools=["Glob"])
+        assert mock_cli.call_args.kwargs["cwd"] == "/tmp/foo"
+        cmd = mock_cli.call_args[0][0]
+        tools_flag = next((a for a in cmd if a.startswith("--allowedTools=")), None)
+        assert tools_flag is not None
+        assert tools_flag.split("=", 1)[1] == "Glob"
+
+    @patch("squad.executor._call_claude_cli")
+    def test_run_task_json_forwards_cwd_and_tools(self, mock_cli):
+        mock_cli.return_value = _completed(stdout=_ndjson('{"ok": true}'))
+        result = run_task_json("prompt", cwd="/tmp/foo", allowed_tools=["Glob"])
+        assert result == {"ok": True}
+        assert mock_cli.call_args.kwargs["cwd"] == "/tmp/foo"
+        cmd = mock_cli.call_args[0][0]
+        tools_flag = next((a for a in cmd if a.startswith("--allowedTools=")), None)
+        assert tools_flag is not None
+        assert tools_flag.split("=", 1)[1] == "Glob"
+
+    def test_call_claude_cli_default_cwd_signature(self):
+        """_call_claude_cli accepts cwd keyword; default is None (no behaviour change)."""
+        import inspect
+
+        from squad.executor import _call_claude_cli
+
+        sig = inspect.signature(_call_claude_cli)
+        assert "cwd" in sig.parameters
+        assert sig.parameters["cwd"].default is None
+
+
+class TestCwdByAgentRouting:
+    @patch("squad.executor.run_agent")
+    def test_run_agents_parallel_routes_cwd_per_agent(self, mock_run):
+        mock_run.side_effect = lambda agent, *a, **kw: f"out-{agent}"
+        run_agents_parallel(
+            ["pm", "ux"],
+            "sess-1",
+            "cadrage",
+            cwd_by_agent={"ux": "/tmp/foo"},
+        )
+        cwd_by_agent = {
+            call.args[0]: call.kwargs.get("cwd") for call in mock_run.call_args_list
+        }
+        assert cwd_by_agent["ux"] == "/tmp/foo"
+        assert cwd_by_agent["pm"] is None
+
+    @patch("squad.executor.run_agent")
+    def test_run_agents_parallel_no_cwd_map_defaults_to_none(self, mock_run):
+        mock_run.return_value = "out"
+        run_agents_parallel(["pm"], "sess-1", "cadrage")
+        assert mock_run.call_args.kwargs.get("cwd") is None
+
+    @patch("squad.executor.run_agent")
+    def test_run_agents_tolerant_routes_cwd_per_agent(self, mock_run):
+        mock_run.side_effect = lambda agent, *a, **kw: f"out-{agent}"
+        run_agents_tolerant(
+            ["pm", "ux"],
+            "sess-1",
+            "cadrage",
+            cwd_by_agent={"ux": "/tmp/foo"},
+        )
+        cwd_by_agent = {
+            call.args[0]: call.kwargs.get("cwd") for call in mock_run.call_args_list
+        }
+        assert cwd_by_agent["ux"] == "/tmp/foo"
+        assert cwd_by_agent["pm"] is None
+
+    @patch("squad.executor.run_agent")
+    def test_run_agents_tolerant_no_cwd_map_defaults_to_none(self, mock_run):
+        mock_run.return_value = "out"
+        run_agents_tolerant(["pm"], "sess-1", "cadrage")
+        assert mock_run.call_args.kwargs.get("cwd") is None
