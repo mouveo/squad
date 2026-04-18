@@ -584,3 +584,15 @@ class TestFormatPipelineEvent:
     def test_failed_without_reason_uses_placeholder(self):
         txt = format_pipeline_event(_event(EVENT_FAILED))
         assert "inconnue" in txt
+
+    def test_interviewing_on_ideation_renders_angle_choice(self):
+        """Pause on ``ideation`` must mention angle selection, not questions."""
+        from squad.constants import PHASE_IDEATION
+
+        txt = format_pipeline_event(
+            _event(EVENT_INTERVIEWING, phase=PHASE_IDEATION, pending_questions=0)
+        )
+        assert "angle" in txt.lower()
+        # Must NOT use the question wording — that would be misleading at 0 Qs.
+        assert "0 question en attente" not in txt
+        assert "questions en attente" not in txt

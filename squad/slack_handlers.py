@@ -14,7 +14,7 @@ from concurrent.futures import Executor
 from pathlib import Path
 
 from squad.attachment_service import AttachmentError, download_file, store_attachment
-from squad.constants import STATUS_FAILED, STATUS_REVIEW
+from squad.constants import PHASE_CADRAGE, STATUS_FAILED, STATUS_REVIEW
 from squad.db import (
     answer_question,
     get_plan,
@@ -66,10 +66,12 @@ logger = logging.getLogger(__name__)
 def _make_event_callback(client, db_path: Path):
     """Return a pipeline event callback that mirrors transitions into Slack.
 
-    Always posts the threaded pipeline-event summary (LOT 2 contract),
-    and — on entry to ``interviewing`` — also posts each pending
-    question as a separate message with its answer button (LOT 4).
-    Observer errors are caught by the pipeline itself.
+    Always posts the threaded pipeline-event summary (LOT 2 contract).
+    On entry to ``interviewing`` for the ``cadrage`` phase it also posts
+    each pending question as a separate message with its answer button
+    (LOT 4). Ideation pauses are handled by the dedicated angle-review
+    flow (LOT 6) — this callback intentionally does NOT post questions
+    for them. Observer errors are caught by the pipeline itself.
     """
 
     def _callback(event: PipelineEvent) -> None:
@@ -77,7 +79,7 @@ def _make_event_callback(client, db_path: Path):
         if session is None:
             return
         post_pipeline_event(event, session, client)
-        if event.type == EVENT_INTERVIEWING:
+        if event.type == EVENT_INTERVIEWING and event.phase == PHASE_CADRAGE:
             post_pending_questions(client, session, db_path=db_path)
         elif event.type == EVENT_REVIEW:
             post_plans_for_review(client, session, db_path=db_path)

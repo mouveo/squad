@@ -17,7 +17,7 @@ from pathlib import Path
 from sqlite_utils import Database
 
 from squad.config import get_global_db_path, get_project_state_dir, load_config
-from squad.constants import MODE_APPROVAL, PHASE_LABELS, SESSION_MODES
+from squad.constants import MODE_APPROVAL, PHASE_IDEATION, PHASE_LABELS, SESSION_MODES
 from squad.db import (
     _to_session,
     create_session,
@@ -255,6 +255,15 @@ def format_pipeline_event(event: PipelineEvent) -> str:
             f"{stamp} · écoulé : {elapsed}"
         )
     if event.type == EVENT_INTERVIEWING:
+        # Ideation pauses wait for an angle selection, not for question
+        # answers — render the appropriate copy so reviewers don't see
+        # a misleading "0 question en attente".
+        if event.phase == PHASE_IDEATION:
+            return (
+                f":pause_button: *En attente du choix d'angle* — "
+                "sélectionnez un angle d'idéation pour reprendre.\n"
+                f"{stamp} · écoulé : {elapsed}"
+            )
         plural = "s" if event.pending_questions != 1 else ""
         return (
             f":pause_button: *En attente de réponses* — "

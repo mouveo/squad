@@ -229,13 +229,15 @@ class TestPipelineIntegration:
         s = _make_session(db_path, project_dir, workspace, idea="short")
         create_workspace(s)
 
-        # Stub agent execution so we exercise the pre-agent scoring step.
+        # Stub the ideation service so the test exercises the pre-agent
+        # richness scoring without needing a real Claude round-trip.
+        from types import SimpleNamespace
+
         monkeypatch.setattr(
             pipeline_mod,
-            "_run_agents",
-            lambda cfg, session, ctx, instr, db_path=None: (
-                {"ideation": "# noop"},
-                {},
+            "_run_ideation",
+            lambda session_id, extra_context=None, db_path=None, **kwargs: SimpleNamespace(
+                content="# noop", angles=[], strategy={}
             ),
         )
 

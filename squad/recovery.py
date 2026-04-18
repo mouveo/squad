@@ -24,9 +24,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from squad.constants import (
+    PHASE_BENCHMARK,
     PHASE_CADRAGE,
     PHASE_CHALLENGE,
     PHASE_CONCEPTION,
+    PHASE_IDEATION,
     PHASES,
     STATUS_APPROVED,
     STATUS_DONE,
@@ -196,6 +198,22 @@ def determine_resume_point(session_id: str, db_path: Path | None = None) -> Resu
         return None
 
     if session.status == STATUS_INTERVIEWING:
+        # Ideation pause: a Slack-driven angle pick is what unblocks the
+        # session, not a Q&A round. The reviewer must select an angle
+        # (which sets ``selected_angle_idx``) before we can resume; once
+        # set, we jump straight to benchmark.
+        if session.current_phase == PHASE_IDEATION:
+            if session.selected_angle_idx is None:
+                raise RuntimeError(
+                    f"Session {session_id!r} is waiting for an ideation angle "
+                    "selection. Pick one before resuming."
+                )
+            return ResumePoint(
+                session_id=session_id,
+                phase=PHASE_BENCHMARK,
+                reason="angle selected — resuming at benchmark",
+            )
+
         if has_pending_questions(session_id, db_path=db_path):
             raise RuntimeError(
                 f"Session {session_id!r} still has unanswered questions. "
