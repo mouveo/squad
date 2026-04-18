@@ -20,6 +20,7 @@ AGENT_FILES = [
     "delivery.md",
     "sales.md",
     "ai-lead.md",
+    "ideation.md",
 ]
 
 REQUIRED_SECTIONS = [
@@ -50,10 +51,10 @@ class TestAgentFilesExist:
     def test_file_exists(self, filename: str):
         assert (AGENTS_DIR / filename).exists(), f"Missing agent file: {filename}"
 
-    def test_exactly_ten_agent_files(self):
+    def test_exactly_eleven_agent_files(self):
         md_files = [f.name for f in AGENTS_DIR.glob("*.md")]
         assert set(AGENT_FILES) == set(md_files), (
-            f"Expected exactly 10 agent .md files, found: {md_files}"
+            f"Expected exactly 11 agent .md files, found: {md_files}"
         )
 
 
