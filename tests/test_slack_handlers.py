@@ -835,14 +835,23 @@ class TestReviewRejectAction:
                 }
             },
         }
-        handle_review_reject_submission(
-            body={}, view=view, client=client, db_path=db_path
-        )
+        from squad.review_service import reject_session as real_reject
+
+        with patch(
+            "squad.slack_handlers.reject_session", wraps=real_reject
+        ) as m_reject:
+            handle_review_reject_submission(
+                body={}, view=view, client=client, db_path=db_path
+            )
         from squad.db import get_session as _get
 
         refreshed = _get(session.id, db_path=db_path)
         assert refreshed.status == STATUS_FAILED
         assert refreshed.failure_reason == "pas assez de détail"
+        # Shared service was the persistence entry point
+        m_reject.assert_called_once_with(
+            session.id, "pas assez de détail", db_path=db_path
+        )
         # Review card updated
         client.chat_update.assert_called_once()
 

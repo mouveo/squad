@@ -21,7 +21,6 @@ from squad.constants import (
     MODE_AUTONOMOUS,
     SESSION_MODES,
     STATUS_APPROVED,
-    STATUS_FAILED,
     STATUS_INTERVIEWING,
     STATUS_REVIEW,
 )
@@ -46,6 +45,7 @@ from squad.forge_bridge import (
 from squad.forge_format import validate_plan
 from squad.notifier import notify_fallback_review, notify_queued
 from squad.pipeline import PipelineError, resume_pipeline, run_pipeline
+from squad.review_service import reject_session
 from squad.workspace import (
     create_workspace,
     get_context,
@@ -327,7 +327,7 @@ def _interactive_review_and_submit(session_id: str, title: str, db_path: Path) -
     )
 
     if decision == "n":
-        update_session_status(session_id, STATUS_FAILED, db_path=db_path)
+        reject_session(session_id, "Rejeté via `squad run`", db_path=db_path)
         click.echo(f"Session {session_id} marquée comme failed.")
         return
     if decision == "q":
@@ -478,7 +478,7 @@ def review(session_id: str, action: str) -> None:
         return
 
     if action == "reject":
-        update_session_status(session_id, STATUS_FAILED, db_path=db_path)
+        reject_session(session_id, "Rejeté via `squad review --action reject`", db_path=db_path)
         click.echo(f"Session {session_id} marked as failed.")
         return
 

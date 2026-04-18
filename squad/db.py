@@ -8,11 +8,11 @@ from pathlib import Path
 from sqlite_utils import Database
 
 from squad.config import get_global_db_path
-from squad.constants import MODE_APPROVAL, STATUS_DONE, STATUS_FAILED
+from squad.constants import MODE_APPROVAL, TERMINAL_STATUSES
 from squad.models import GeneratedPlan, IdeationAngle, PhaseOutput, Question, Session
 
-# Statuses that mean a session is no longer in progress
-_TERMINAL_STATUSES = (STATUS_DONE, STATUS_FAILED)
+# Local tuple form for parameter binding (sqlite-utils uses positional ?).
+_TERMINAL_STATUSES: tuple[str, ...] = tuple(sorted(TERMINAL_STATUSES))
 
 
 def _decode_json(value: str | None, default):

@@ -401,7 +401,28 @@ class TestReviewCommand:
             )
         from squad.db import get_session as _get
 
-        assert _get(session.id, db_path=db_path).status == "failed"
+        refreshed = _get(session.id, db_path=db_path)
+        assert refreshed.status == "failed"
+        # Rejection reason must be persisted via the shared service.
+        assert refreshed.failure_reason is not None
+        assert refreshed.failure_reason != ""
+
+    def test_reject_uses_shared_reject_service(self, runner, db_path, project_dir):
+        session = _prepare_session_with_plans(runner, db_path, project_dir)
+        with (
+            patch("squad.cli.get_global_db_path", return_value=db_path),
+            patch("squad.cli.reject_session") as m_reject,
+        ):
+            runner.invoke(
+                cli,
+                ["review", session.id, "--action", "reject"],
+                catch_exceptions=False,
+            )
+        m_reject.assert_called_once()
+        args, kwargs = m_reject.call_args
+        assert args[0] == session.id
+        assert isinstance(args[1], str) and args[1]
+        assert kwargs["db_path"] == db_path
 
     def test_edit_valid_persists_changes(self, runner, db_path, project_dir):
         session = _prepare_session_with_plans(runner, db_path, project_dir)
@@ -849,10 +870,13 @@ class TestRunCommand:
     def test_approval_review_reject_marks_failed(
         self, runner: CliRunner, db_path: Path, project_dir: Path
     ):
+        from squad.review_service import reject_session as real_reject
+
         with (
             patch("squad.cli.get_global_db_path", return_value=db_path),
             patch("squad.cli.run_pipeline", side_effect=_land_in_review),
             patch("squad.cli.submit_session_to_forge") as m_submit,
+            patch("squad.cli.reject_session", wraps=real_reject) as m_reject,
         ):
             result = runner.invoke(
                 cli,
@@ -862,11 +886,14 @@ class TestRunCommand:
             )
         assert result.exit_code == 0
         m_submit.assert_not_called()
+        m_reject.assert_called_once()
         from squad.db import get_session as _get
         from squad.db import list_session_history as _hist
 
         sess = _hist(db_path=db_path)[0]
-        assert _get(sess.id, db_path=db_path).status == "failed"
+        refreshed = _get(sess.id, db_path=db_path)
+        assert refreshed.status == "failed"
+        assert refreshed.failure_reason
 
     def test_approval_review_quit_keeps_review(
         self, runner: CliRunner, db_path: Path, project_dir: Path
