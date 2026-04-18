@@ -42,3 +42,6 @@ Challenger la conception et l'architecture pour identifier les risques de sécur
 - read_files: oui
 - write_files: oui
 - execute_commands: non
+- glob: non
+- list_files: non
+- grep_files: non

@@ -5,6 +5,9 @@ import pytest
 from squad.constants import (
     AGENT_CAPABILITIES,
     CAP_EXECUTE_COMMANDS,
+    CAP_GLOB,
+    CAP_GREP_FILES,
+    CAP_LIST_FILES,
     CAP_READ_FILES,
     CAP_WEB_FETCH,
     CAP_WEB_SEARCH,
@@ -131,6 +134,9 @@ class TestAgentCapabilityConstants:
             "read_files",
             "write_files",
             "execute_commands",
+            "glob",
+            "list_files",
+            "grep_files",
         }
 
     def test_capability_values(self):
@@ -139,6 +145,20 @@ class TestAgentCapabilityConstants:
         assert CAP_READ_FILES == "read_files"
         assert CAP_WRITE_FILES == "write_files"
         assert CAP_EXECUTE_COMMANDS == "execute_commands"
+        assert CAP_GLOB == "glob"
+        assert CAP_LIST_FILES == "list_files"
+        assert CAP_GREP_FILES == "grep_files"
+
+    def test_active_exploration_capabilities_are_unique(self):
+        active_exploration = {CAP_GLOB, CAP_LIST_FILES, CAP_GREP_FILES}
+        existing = {
+            CAP_WEB_SEARCH,
+            CAP_WEB_FETCH,
+            CAP_READ_FILES,
+            CAP_WRITE_FILES,
+            CAP_EXECUTE_COMMANDS,
+        }
+        assert active_exploration.isdisjoint(existing)
 
 
 # ── enums ──────────────────────────────────────────────────────────────────────

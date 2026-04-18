@@ -1,8 +1,9 @@
 """Tests for squad/pipeline.py — happy path, pause, retry, resume, failures."""
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -612,3 +613,318 @@ class TestEventCallback:
         persisted = get_session(session.id, db_path=db_path)
         assert persisted.status == "failed"
         assert "Plan generation failed" in (persisted.failure_reason or "")
+
+
+# ── cwd routing by agent (LOT 3 — Plan 5) ─────────────────────────────────────
+
+
+class TestCwdRoutingByAgent:
+    def test_parallel_phase_routes_cwd_only_to_ux_and_architect(
+        self, db_path, session, happy_pm_output
+    ):
+        """In etat_des_lieux, only ux should get cwd=project_path; others None."""
+        captured_cwd_maps: list[dict[str, str | None]] = []
+
+        def _tolerant(
+            agents_list,
+            session_id,
+            phase,
+            context_sections_by_agent=None,
+            *,
+            cumulative_context=None,
+            phase_instruction=None,
+            cwd_by_agent=None,
+        ):
+            if phase == PHASE_ETAT_DES_LIEUX:
+                captured_cwd_maps.append(dict(cwd_by_agent or {}))
+            return {a: f"# {a}" for a in agents_list}, {}
+
+        with (
+            patch("squad.pipeline.run_agent", return_value=happy_pm_output),
+            patch("squad.pipeline.run_agents_tolerant", side_effect=_tolerant),
+        ):
+            run_phase(session.id, PHASE_ETAT_DES_LIEUX, db_path=db_path)
+
+        assert captured_cwd_maps, "etat_des_lieux did not dispatch through run_agents_tolerant"
+        cwd_map = captured_cwd_maps[0]
+        assert cwd_map["ux"] == session.project_path
+        for agent in ("customer-success", "data", "sales"):
+            assert cwd_map.get(agent) is None
+
+    def test_conception_phase_routes_cwd_to_ux_and_architect_only(
+        self, db_path, session, happy_pm_output
+    ):
+        captured: list[dict[str, str | None]] = []
+
+        def _tolerant(
+            agents_list,
+            session_id,
+            phase,
+            context_sections_by_agent=None,
+            *,
+            cumulative_context=None,
+            phase_instruction=None,
+            cwd_by_agent=None,
+        ):
+            if phase == PHASE_CONCEPTION:
+                captured.append(dict(cwd_by_agent or {}))
+            return {a: f"# {a}" for a in agents_list}, {}
+
+        with (
+            patch("squad.pipeline.run_agent", return_value=happy_pm_output),
+            patch("squad.pipeline.run_agents_tolerant", side_effect=_tolerant),
+        ):
+            run_phase(session.id, PHASE_CONCEPTION, db_path=db_path)
+
+        assert captured
+        cwd_map = captured[0]
+        assert cwd_map["ux"] == session.project_path
+        assert cwd_map["architect"] == session.project_path
+        assert cwd_map.get("ai-lead") is None
+        assert cwd_map.get("growth") is None
+
+    def test_challenge_phase_routes_cwd_to_architect_only(
+        self, db_path, session, happy_pm_output
+    ):
+        captured: list[dict[str, str | None]] = []
+
+        def _tolerant(
+            agents_list,
+            session_id,
+            phase,
+            context_sections_by_agent=None,
+            *,
+            cumulative_context=None,
+            phase_instruction=None,
+            cwd_by_agent=None,
+        ):
+            if phase == PHASE_CHALLENGE:
+                captured.append(dict(cwd_by_agent or {}))
+            return {a: f"# {a}" for a in agents_list}, {}
+
+        with (
+            patch("squad.pipeline.run_agent", return_value=happy_pm_output),
+            patch("squad.pipeline.run_agents_tolerant", side_effect=_tolerant),
+        ):
+            run_phase(session.id, PHASE_CHALLENGE, db_path=db_path)
+
+        assert captured
+        cwd_map = captured[0]
+        assert cwd_map["architect"] == session.project_path
+        assert cwd_map.get("security") is None
+        assert cwd_map.get("delivery") is None
+
+    def test_sequential_phase_does_not_route_cwd_for_pm(
+        self, db_path, session, happy_pm_output
+    ):
+        captured_kwargs: list[dict] = []
+
+        def _agent(*args, **kwargs):
+            captured_kwargs.append(kwargs)
+            return happy_pm_output
+
+        with patch("squad.pipeline.run_agent", side_effect=_agent):
+            run_phase(session.id, PHASE_CADRAGE, db_path=db_path)
+
+        assert captured_kwargs
+        pm_call = captured_kwargs[0]
+        assert pm_call.get("cwd") is None
+
+    def test_sequential_run_agent_forwards_cwd_when_applicable(
+        self, db_path, session, happy_pm_output, monkeypatch
+    ):
+        """Force a sequential phase to include ux to prove run_agent cwd plumbing."""
+        from squad import phase_config as pc
+
+        sequential_cfg = pc.PhaseConfig(
+            phase=PHASE_CADRAGE,
+            order=1,
+            default_agents=("ux",),
+            critical_agents=(),
+            parallel=False,
+            can_pause=False,
+            max_questions=0,
+            retry_policy=pc.RetryPolicy(max_attempts=1),
+            skip_policy=pc.SkipPolicy(),
+        )
+
+        def _fake_get_phase_config(phase):
+            return sequential_cfg if phase == PHASE_CADRAGE else pc.PHASE_CONFIGS[phase]
+
+        monkeypatch.setattr("squad.pipeline.get_phase_config", _fake_get_phase_config)
+
+        captured: list[dict] = []
+
+        def _agent(*args, **kwargs):
+            captured.append(kwargs)
+            return "# ux output"
+
+        with patch("squad.pipeline.run_agent", side_effect=_agent):
+            run_phase(session.id, PHASE_CADRAGE, db_path=db_path)
+
+        assert captured
+        assert captured[0]["cwd"] == session.project_path
+        assert captured[0]["agent_name"] == "ux"
+
+    def test_missing_project_path_yields_cwd_none_with_warning(
+        self, db_path, tmp_path, caplog
+    ):
+        """project_path pointing at a non-existent dir → cwd=None + warning."""
+        workspace_path = tmp_path / "workspace"
+        s = create_session(
+            title="Ghost project",
+            project_path=str(tmp_path / "does-not-exist"),
+            workspace_path=str(workspace_path),
+            idea="x",
+            db_path=db_path,
+        )
+        create_workspace(s)
+
+        captured: list[dict[str, str | None]] = []
+
+        def _tolerant(
+            agents_list,
+            session_id,
+            phase,
+            context_sections_by_agent=None,
+            *,
+            cumulative_context=None,
+            phase_instruction=None,
+            cwd_by_agent=None,
+        ):
+            captured.append(dict(cwd_by_agent or {}))
+            return {a: f"# {a}" for a in agents_list}, {}
+
+        import logging
+
+        with (
+            caplog.at_level(logging.WARNING, logger="squad.pipeline"),
+            patch("squad.pipeline.run_agents_tolerant", side_effect=_tolerant),
+        ):
+            run_phase(s.id, PHASE_ETAT_DES_LIEUX, db_path=db_path)
+
+        assert captured
+        assert captured[0]["ux"] is None
+        assert any("does not exist" in r.message for r in caplog.records)
+
+    def test_empty_project_path_yields_cwd_none(
+        self, db_path, tmp_path, happy_pm_output
+    ):
+        """Empty project_path → cwd=None without warning."""
+        workspace_path = tmp_path / "workspace"
+        s = create_session(
+            title="No project",
+            project_path="",
+            workspace_path=str(workspace_path),
+            idea="x",
+            db_path=db_path,
+        )
+        create_workspace(s)
+
+        captured: list[dict[str, str | None]] = []
+
+        def _tolerant(
+            agents_list,
+            session_id,
+            phase,
+            context_sections_by_agent=None,
+            *,
+            cumulative_context=None,
+            phase_instruction=None,
+            cwd_by_agent=None,
+        ):
+            captured.append(dict(cwd_by_agent or {}))
+            return {a: f"# {a}" for a in agents_list}, {}
+
+        with patch("squad.pipeline.run_agents_tolerant", side_effect=_tolerant):
+            run_phase(s.id, PHASE_ETAT_DES_LIEUX, db_path=db_path)
+
+        assert captured
+        assert captured[0]["ux"] is None
+
+
+# ── smoke: pipeline -> executor (LOT 5 — Plan 5) ──────────────────────────────
+
+
+class TestPipelineExecutorSmoke:
+    """End-to-end smoke tests from pipeline through the real executor code.
+
+    Only ``squad.executor._call_claude_cli`` is mocked — the pipeline
+    calls ``run_agent`` / ``run_agents_tolerant`` as usual, agent
+    markdowns are parsed for real, and the subprocess argv (including
+    ``--allowedTools`` and ``cwd``) is captured at the last hop before
+    the real CLI would be invoked. These are intentionally *not* marked
+    ``@pytest.mark.integration`` because no real Claude process is
+    launched.
+    """
+
+    @staticmethod
+    def _fake_completed(text: str = "ok output") -> MagicMock:
+        mock = MagicMock()
+        mock.stdout = json.dumps({"type": "text", "text": text})
+        mock.returncode = 0
+        mock.stderr = ""
+        return mock
+
+    def _capture_calls(self):
+        calls: list[dict] = []
+
+        def fake(cmd, timeout, cwd=None):
+            calls.append({"cmd": list(cmd), "cwd": cwd})
+            return self._fake_completed()
+
+        return calls, fake
+
+    @staticmethod
+    def _calls_for_agent(calls: list[dict], agent_name: str) -> list[dict]:
+        header = f"# Agent: {agent_name}\n"
+        return [c for c in calls if c["cmd"][-1].startswith(header)]
+
+    @staticmethod
+    def _tools_of(call: dict) -> str:
+        for arg in call["cmd"]:
+            if isinstance(arg, str) and arg.startswith("--allowedTools="):
+                return arg.split("=", 1)[1]
+        return ""
+
+    def test_ux_gets_exploration_tools_and_cwd_end_to_end(self, db_path, session):
+        calls, fake = self._capture_calls()
+        with patch("squad.executor._call_claude_cli", side_effect=fake):
+            run_phase(session.id, PHASE_ETAT_DES_LIEUX, db_path=db_path)
+
+        ux_calls = self._calls_for_agent(calls, "ux")
+        assert len(ux_calls) == 1, "ux should be invoked exactly once in etat_des_lieux"
+        assert self._tools_of(ux_calls[0]) == "Read,WebSearch,WebFetch,Glob,LS,Grep"
+        assert ux_calls[0]["cwd"] == session.project_path
+
+    def test_customer_success_keeps_read_only_without_cwd(self, db_path, session):
+        calls, fake = self._capture_calls()
+        with patch("squad.executor._call_claude_cli", side_effect=fake):
+            run_phase(session.id, PHASE_ETAT_DES_LIEUX, db_path=db_path)
+
+        cs_calls = self._calls_for_agent(calls, "customer-success")
+        assert len(cs_calls) == 1
+        assert self._tools_of(cs_calls[0]) == "Read"
+        assert cs_calls[0]["cwd"] is None
+
+    def test_sales_keeps_web_tools_without_project_cwd(self, db_path, session):
+        calls, fake = self._capture_calls()
+        with patch("squad.executor._call_claude_cli", side_effect=fake):
+            run_phase(session.id, PHASE_ETAT_DES_LIEUX, db_path=db_path)
+
+        sales_calls = self._calls_for_agent(calls, "sales")
+        assert len(sales_calls) == 1
+        assert self._tools_of(sales_calls[0]) == "Read,WebSearch,WebFetch"
+        assert sales_calls[0]["cwd"] is None
+
+    def test_architect_gets_exploration_tools_and_cwd_in_challenge(
+        self, db_path, session
+    ):
+        calls, fake = self._capture_calls()
+        with patch("squad.executor._call_claude_cli", side_effect=fake):
+            run_phase(session.id, PHASE_CHALLENGE, db_path=db_path)
+
+        architect_calls = self._calls_for_agent(calls, "architect")
+        assert len(architect_calls) == 1
+        assert self._tools_of(architect_calls[0]) == "Read,WebSearch,WebFetch,Glob,LS,Grep"
+        assert architect_calls[0]["cwd"] == session.project_path

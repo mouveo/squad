@@ -43,3 +43,6 @@ Challenger le périmètre de la conception pour identifier les risques d'exécut
 - read_files: oui
 - write_files: oui
 - execute_commands: non
+- glob: non
+- list_files: non
+- grep_files: non
