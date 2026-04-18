@@ -64,6 +64,24 @@ mode: approval
 # Slack notifications (squad.notifier).
 slack:
   # webhook: ${SQUAD_SLACK_WEBHOOK}
+  #
+  # Interactive Slack app — `squad serve` (Socket Mode).
+  # bot_token: ${SQUAD_SLACK_BOT_TOKEN}
+  # app_token: ${SQUAD_SLACK_APP_TOKEN}
+  #
+  # Allowlist of Slack user IDs permitted to drive Squad (empty = no allowlist).
+  # allowed_user_ids: []
+  #
+  # Map a Slack channel ID to the local project path Squad should target.
+  # channels:
+  #   C0123456789:
+  #     project_path: /absolute/path/to/project
+  #
+  # Attachments uploaded to a session thread (Plan 4 — LOT 3).
+  # attachments:
+  #   allowed_extensions: [md, txt, csv, pdf, png, jpg, jpeg]
+  #   max_file_bytes: 10485760       # 10 MB per file
+  #   max_total_bytes: 52428800      # 50 MB cumulés par session
 
 # Forge integration.
 forge:

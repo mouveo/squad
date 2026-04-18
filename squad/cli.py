@@ -538,6 +538,38 @@ def approve(session_id: str) -> None:
 
 
 @cli.command()
+@click.option(
+    "--max-workers",
+    type=int,
+    default=4,
+    show_default=True,
+    help="Size of the thread pool used to run pipelines off the Socket Mode thread.",
+)
+def serve(max_workers: int) -> None:
+    """Start the Slack Socket Mode app (interactive Slack interface).
+
+    Requires the optional ``slack`` extra (``pip install -e ".[slack]"``)
+    and both ``slack.bot_token`` / ``slack.app_token`` in the config
+    (typically fed from ``SQUAD_SLACK_BOT_TOKEN`` and
+    ``SQUAD_SLACK_APP_TOKEN``).
+    """
+    db_path = get_global_db_path()
+    ensure_schema(db_path)
+
+    try:
+        from squad.slack_app import SlackConfigError, run_serve
+    except ImportError as exc:
+        raise click.ClickException(
+            "Slack extra not installed — run `pip install -e \".[slack]\"` first."
+        ) from exc
+
+    try:
+        run_serve(db_path=db_path, max_workers=max_workers)
+    except SlackConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@cli.command()
 @click.option("--project", "project_path", default=None, help="Filter by project path.")
 @click.option("--limit", default=10, show_default=True, help="Maximum number of sessions.")
 def history(project_path: str | None, limit: int) -> None:

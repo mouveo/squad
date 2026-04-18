@@ -60,6 +60,10 @@ def _to_session(row: dict) -> Session:
         phase_attempts=_decode_json(row.get("phase_attempts"), {}),
         challenge_retry_count=int(row.get("challenge_retry_count") or 0),
         skipped_phases=_decode_json(row.get("skipped_phases"), {}),
+        slack_channel=row.get("slack_channel"),
+        slack_thread_ts=row.get("slack_thread_ts"),
+        slack_user_id=row.get("slack_user_id"),
+        failure_reason=row.get("failure_reason"),
     )
 
 
@@ -88,6 +92,7 @@ def _to_question(row: dict) -> Question:
         answer=row.get("answer"),
         answered_at=_dt(row.get("answered_at")),
         created_at=_dt(row.get("created_at")) or datetime.utcnow(),
+        slack_message_ts=row.get("slack_message_ts"),
     )
 
 
@@ -100,6 +105,7 @@ def _to_plan(row: dict) -> GeneratedPlan:
         content=row["content"],
         forge_status=row.get("forge_status"),
         created_at=_dt(row.get("created_at")) or datetime.utcnow(),
+        slack_message_ts=row.get("slack_message_ts"),
     )
 
 
@@ -129,6 +135,12 @@ def ensure_schema(db_path: Path | None = None) -> None:
             "phase_attempts": str,
             "challenge_retry_count": int,
             "skipped_phases": str,
+            # Slack origin (Plan 4 — LOT 1)
+            "slack_channel": str,
+            "slack_thread_ts": str,
+            "slack_user_id": str,
+            # Failure context (Plan 4 — LOT 2)
+            "failure_reason": str,
         },
         pk="id",
         not_null={"title", "project_path", "workspace_path", "idea", "status"},
@@ -146,6 +158,10 @@ def ensure_schema(db_path: Path | None = None) -> None:
         ("agents_by_phase", str),
         ("phase_attempts", str),
         ("skipped_phases", str),
+        ("slack_channel", str),
+        ("slack_thread_ts", str),
+        ("slack_user_id", str),
+        ("failure_reason", str),
     ):
         if col not in session_cols:
             db["sessions"].add_column(col, col_type)
@@ -185,12 +201,20 @@ def ensure_schema(db_path: Path | None = None) -> None:
             "answer": str,
             "answered_at": str,
             "created_at": str,
+            # Slack thread message id — lets chat_update keep the
+            # in-thread question rendering in sync with its answer state
+            # (Plan 4 — LOT 4).
+            "slack_message_ts": str,
         },
         pk="id",
         not_null={"session_id", "agent", "phase", "question"},
         if_not_exists=True,
     )
     db["questions"].create_index(["session_id"], if_not_exists=True)
+
+    # Additive migration for DBs created before LOT 4
+    if "slack_message_ts" not in db["questions"].columns_dict:
+        db["questions"].add_column("slack_message_ts", str)
 
     db["plans"].create(
         {
@@ -201,12 +225,18 @@ def ensure_schema(db_path: Path | None = None) -> None:
             "content": str,
             "forge_status": str,
             "created_at": str,
+            # Slack thread message id for the plan's review card (LOT 5 — Plan 4).
+            "slack_message_ts": str,
         },
         pk="id",
         not_null={"session_id", "title", "file_path", "content"},
         if_not_exists=True,
     )
     db["plans"].create_index(["session_id"], if_not_exists=True)
+
+    # Additive migration for DBs created before LOT 5
+    if "slack_message_ts" not in db["plans"].columns_dict:
+        db["plans"].add_column("slack_message_ts", str)
 
 
 # ── sessions ───────────────────────────────────────────────────────────────────
@@ -220,6 +250,9 @@ def create_session(
     mode: str = MODE_APPROVAL,
     db_path: Path | None = None,
     session_id: str | None = None,
+    slack_channel: str | None = None,
+    slack_thread_ts: str | None = None,
+    slack_user_id: str | None = None,
 ) -> Session:
     """Insert a new session and return it."""
     db = _open(db_path)
@@ -241,6 +274,10 @@ def create_session(
         "phase_attempts": None,
         "challenge_retry_count": 0,
         "skipped_phases": None,
+        "slack_channel": slack_channel,
+        "slack_thread_ts": slack_thread_ts,
+        "slack_user_id": slack_user_id,
+        "failure_reason": None,
     }
     db["sessions"].insert(row)
     return _to_session(row)
@@ -268,6 +305,38 @@ def update_session_status(
     if current_phase is not None:
         updates["current_phase"] = current_phase
     db["sessions"].update(session_id, updates)
+
+
+def update_session_slack_thread(
+    session_id: str,
+    slack_thread_ts: str,
+    db_path: Path | None = None,
+) -> None:
+    """Persist the Slack thread timestamp once the root message has been posted."""
+    db = _open(db_path)
+    db["sessions"].update(
+        session_id,
+        {"slack_thread_ts": slack_thread_ts, "updated_at": _now()},
+    )
+
+
+def update_session_failure_reason(
+    session_id: str,
+    reason: str,
+    db_path: Path | None = None,
+) -> None:
+    """Persist a short failure reason on the session row.
+
+    Called when the pipeline terminates in ``failed`` and (later) when a
+    human reviewer rejects the session with a reason — both flows share
+    this column so Slack and the CLI can surface a single consistent
+    explanation.
+    """
+    db = _open(db_path)
+    db["sessions"].update(
+        session_id,
+        {"failure_reason": reason, "updated_at": _now()},
+    )
 
 
 def list_active_sessions(db_path: Path | None = None) -> list[Session]:
@@ -512,6 +581,29 @@ def answer_question(question_id: str, answer: str, db_path: Path | None = None) 
     )
 
 
+def get_question(question_id: str, db_path: Path | None = None) -> Question | None:
+    """Return a question by ID, or None if not found."""
+    db = _open(db_path)
+    try:
+        row = db["questions"].get(question_id)
+        return _to_question(dict(row))
+    except Exception:
+        return None
+
+
+def update_question_slack_message_ts(
+    question_id: str,
+    slack_message_ts: str,
+    db_path: Path | None = None,
+) -> None:
+    """Persist the Slack message timestamp for a question (used by chat_update)."""
+    db = _open(db_path)
+    db["questions"].update(
+        question_id,
+        {"slack_message_ts": slack_message_ts},
+    )
+
+
 # ── plans ──────────────────────────────────────────────────────────────────────
 
 
@@ -546,3 +638,23 @@ def list_plans(session_id: str, db_path: Path | None = None) -> list[GeneratedPl
         order_by="created_at ASC",
     )
     return [_to_plan(dict(r)) for r in rows]
+
+
+def get_plan(plan_id: str, db_path: Path | None = None) -> GeneratedPlan | None:
+    """Return a generated plan by ID, or None when missing."""
+    db = _open(db_path)
+    try:
+        row = db["plans"].get(plan_id)
+        return _to_plan(dict(row))
+    except Exception:
+        return None
+
+
+def update_plan_slack_message_ts(
+    plan_id: str,
+    slack_message_ts: str,
+    db_path: Path | None = None,
+) -> None:
+    """Persist the Slack review-message ``ts`` for a plan (used by chat_update)."""
+    db = _open(db_path)
+    db["plans"].update(plan_id, {"slack_message_ts": slack_message_ts})

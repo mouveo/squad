@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
+from pathlib import Path
 
 from squad.constants import (
     MODE_APPROVAL,
@@ -68,6 +69,12 @@ class Session:
     challenge_retry_count: int = 0
     # Phase id → skip reason (benchmark on light depth, etc.)
     skipped_phases: dict[str, str] = field(default_factory=dict)
+    # Slack origin (set only when the session was created from Slack)
+    slack_channel: str | None = None
+    slack_thread_ts: str | None = None
+    slack_user_id: str | None = None
+    # Persisted failure explanation (pipeline crash or human rejection)
+    failure_reason: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in SESSION_STATUSES:
@@ -121,6 +128,8 @@ class Question:
     answer: str | None = None
     answered_at: datetime | None = None
     created_at: datetime = field(default_factory=datetime.utcnow)
+    # Slack thread message id used by the handler's chat_update (LOT 4)
+    slack_message_ts: str | None = None
 
 
 @dataclass
@@ -132,3 +141,76 @@ class GeneratedPlan:
     content: str
     forge_status: str | None = None
     created_at: datetime = field(default_factory=datetime.utcnow)
+    # Slack review-card message id (LOT 5 — used by chat_update)
+    slack_message_ts: str | None = None
+
+
+# ── Slack attachments (Plan 4 — LOT 3) ────────────────────────────────────────
+
+
+@dataclass
+class AttachmentMeta:
+    """Metadata for a file attached to a Slack session thread.
+
+    The actual bytes live in ``{workspace}/attachments/{filename}``;
+    this dataclass carries only the descriptive fields used by the
+    context builder, the listing API and (later) the audit logs.
+    ``mime_type`` is whatever Slack reports — Squad does not infer it.
+    """
+
+    session_id: str
+    filename: str
+    path: str
+    size_bytes: int
+    mime_type: str | None = None
+    extension: str = ""
+    slack_file_id: str | None = None
+    uploaded_at: datetime = field(default_factory=datetime.utcnow)
+
+    def __post_init__(self) -> None:
+        if not self.extension:
+            self.extension = Path(self.filename).suffix.lstrip(".").lower()
+
+
+# ── Pipeline events (Plan 4 — LOT 2) ──────────────────────────────────────────
+
+# Event type constants — emitted by ``squad.pipeline`` as the session
+# moves through its states. Consumers (Slack live-updates, future UIs)
+# match on ``PipelineEvent.type``.
+EVENT_WORKING = "working"
+EVENT_INTERVIEWING = "interviewing"
+EVENT_REVIEW = "review"
+EVENT_FAILED = "failed"
+
+PIPELINE_EVENT_TYPES: tuple[str, ...] = (
+    EVENT_WORKING,
+    EVENT_INTERVIEWING,
+    EVENT_REVIEW,
+    EVENT_FAILED,
+)
+
+
+@dataclass
+class PipelineEvent:
+    """Structured event emitted by the pipeline for async consumers.
+
+    ``type`` is the session state the event represents. ``phase`` is the
+    canonical phase identifier when relevant (set on every
+    ``working`` event, and on ``interviewing`` events where the pause
+    originates in a specific phase). ``elapsed_seconds`` is measured
+    from the session's ``created_at`` so resume flows still report a
+    useful duration.
+    """
+
+    type: str
+    session_id: str
+    timestamp_utc: datetime
+    elapsed_seconds: float
+    phase: str | None = None
+    pending_questions: int = 0
+    plans_count: int = 0
+    failure_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.type not in PIPELINE_EVENT_TYPES:
+            raise ValueError(f"Invalid pipeline event type: {self.type!r}")

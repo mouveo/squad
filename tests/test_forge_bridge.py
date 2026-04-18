@@ -241,3 +241,70 @@ class TestSubmitSessionToForge:
     def test_unknown_session_raises(self, db_path):
         with pytest.raises(ValueError, match="Session not found"):
             submit_session_to_forge("ghost", db_path=db_path)
+
+
+# ── approve_and_submit (LOT 5 — Plan 4) ───────────────────────────────────────
+
+
+from squad.constants import STATUS_APPROVED, STATUS_REVIEW  # noqa: E402
+from squad.db import update_session_status  # noqa: E402
+from squad.forge_bridge import approve_and_submit  # noqa: E402
+
+
+class TestApproveAndSubmit:
+    def test_happy_path_transitions_to_queued(self, session, db_path):
+        update_session_status(session.id, STATUS_REVIEW, db_path=db_path)
+        create_plan(session.id, "p", "/tmp/p.md", "# plan", db_path=db_path)
+        with (
+            patch(
+                "squad.forge_bridge.get_queue_status",
+                return_value=QueueStatus(available=True, busy=False),
+            ),
+            patch(
+                "squad.forge_bridge._run_forge",
+                return_value=_completed(returncode=0),
+            ),
+        ):
+            outcome = approve_and_submit(session.id, db_path=db_path)
+        assert isinstance(outcome, SubmitOutcome)
+        assert outcome.plans_sent == 1
+        assert get_session(session.id, db_path=db_path).status == STATUS_QUEUED
+
+    def test_forge_unavailable_reverts_to_review(self, session, db_path):
+        update_session_status(session.id, STATUS_REVIEW, db_path=db_path)
+        create_plan(session.id, "p", "/tmp/p.md", "# plan", db_path=db_path)
+        with (
+            patch(
+                "squad.forge_bridge.get_queue_status",
+                return_value=QueueStatus(available=False, busy=False, reason="no forge"),
+            ),
+            pytest.raises(ForgeUnavailable),
+        ):
+            approve_and_submit(session.id, db_path=db_path)
+        # Must revert to review so the session is still actionable
+        assert get_session(session.id, db_path=db_path).status == STATUS_REVIEW
+
+    def test_queue_busy_reverts_to_review(self, session, db_path):
+        update_session_status(session.id, STATUS_REVIEW, db_path=db_path)
+        create_plan(session.id, "p", "/tmp/p.md", "# plan", db_path=db_path)
+        with (
+            patch(
+                "squad.forge_bridge.get_queue_status",
+                return_value=QueueStatus(available=True, busy=True),
+            ),
+            pytest.raises(ForgeQueueBusy),
+        ):
+            approve_and_submit(session.id, db_path=db_path)
+        assert get_session(session.id, db_path=db_path).status == STATUS_REVIEW
+
+    def test_no_plans_reverts_to_review(self, session, db_path):
+        update_session_status(session.id, STATUS_REVIEW, db_path=db_path)
+        with (
+            patch(
+                "squad.forge_bridge.get_queue_status",
+                return_value=QueueStatus(available=True, busy=False),
+            ),
+            pytest.raises(ValueError, match="No plans"),
+        ):
+            approve_and_submit(session.id, db_path=db_path)
+        assert get_session(session.id, db_path=db_path).status == STATUS_REVIEW

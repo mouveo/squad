@@ -235,3 +235,51 @@ class TestWriteDefaultConfig:
         write_default_config(target)
         loaded = load_config()
         assert loaded["mode"] == "approval"
+
+
+# ── Slack config (LOT 1 — Plan 4) ─────────────────────────────────────────────
+
+
+class TestSlackConfig:
+    def test_default_yaml_documents_slack_keys(self):
+        # Interactive Slack keys are documented (commented) in the default template
+        # so users know what to set when enabling `squad serve`.
+        assert "bot_token" in DEFAULT_CONFIG_YAML
+        assert "app_token" in DEFAULT_CONFIG_YAML
+        assert "allowed_user_ids" in DEFAULT_CONFIG_YAML
+        assert "channels:" in DEFAULT_CONFIG_YAML
+        assert "project_path" in DEFAULT_CONFIG_YAML
+
+    def test_channel_mapping_roundtrip(self, fake_home: Path, tmp_path: Path):
+        cfg = get_global_config_path()
+        cfg.parent.mkdir(parents=True)
+        cfg.write_text(
+            "slack:\n"
+            "  bot_token: xoxb-abc\n"
+            "  app_token: xapp-abc\n"
+            "  allowed_user_ids: [U1, U2]\n"
+            "  channels:\n"
+            "    C999:\n"
+            "      project_path: /tmp/proj\n",
+            encoding="utf-8",
+        )
+        loaded = load_config()
+        assert loaded["slack"]["bot_token"] == "xoxb-abc"
+        assert loaded["slack"]["app_token"] == "xapp-abc"
+        assert loaded["slack"]["allowed_user_ids"] == ["U1", "U2"]
+        assert loaded["slack"]["channels"]["C999"]["project_path"] == "/tmp/proj"
+
+    def test_slack_env_interpolation(self, fake_home: Path, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("SQUAD_SLACK_BOT_TOKEN", "xoxb-env")
+        monkeypatch.setenv("SQUAD_SLACK_APP_TOKEN", "xapp-env")
+        cfg = get_global_config_path()
+        cfg.parent.mkdir(parents=True)
+        cfg.write_text(
+            "slack:\n"
+            "  bot_token: ${SQUAD_SLACK_BOT_TOKEN}\n"
+            "  app_token: ${SQUAD_SLACK_APP_TOKEN}\n",
+            encoding="utf-8",
+        )
+        loaded = load_config()
+        assert loaded["slack"]["bot_token"] == "xoxb-env"
+        assert loaded["slack"]["app_token"] == "xapp-env"

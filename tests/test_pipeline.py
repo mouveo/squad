@@ -462,3 +462,143 @@ class TestResume:
         update_session_status(session.id, status="done", db_path=db_path)
         rp = resume_pipeline(session.id, db_path=db_path)
         assert rp is None
+
+
+# ── event callback + failure_reason (LOT 2 — Plan 4) ──────────────────────────
+
+
+class TestEventCallback:
+    def test_working_event_per_phase(self, db_path, session, happy_pm_output):
+        from squad.models import EVENT_WORKING
+
+        events = []
+
+        def cb(evt):
+            events.append(evt)
+
+        with (
+            patch("squad.pipeline.run_agent") as m_agent,
+            patch("squad.pipeline.run_agents_tolerant") as m_tol,
+        ):
+            _configure_mocks(m_agent, m_tol, happy_pm_output)
+            run_pipeline(session.id, db_path=db_path, event_callback=cb)
+
+        working_phases = [e.phase for e in events if e.type == EVENT_WORKING]
+        # One working event per phase, in canonical order
+        assert working_phases == PHASES
+        # Every working event includes a timestamp and non-negative elapsed
+        for e in events:
+            if e.type == EVENT_WORKING:
+                assert e.timestamp_utc is not None
+                assert e.elapsed_seconds >= 0
+
+    def test_review_event_emitted_with_plan_count(
+        self, db_path, session, happy_pm_output
+    ):
+        from squad.db import create_plan
+        from squad.models import EVENT_REVIEW
+
+        def _make_plans(session_id, db_path):  # replaces _generate_and_copy_plans
+            create_plan(session_id, "p1", "/tmp/p1.md", "# plan 1", db_path=db_path)
+            create_plan(session_id, "p2", "/tmp/p2.md", "# plan 2", db_path=db_path)
+
+        events = []
+        with (
+            patch("squad.pipeline.run_agent") as m_agent,
+            patch("squad.pipeline.run_agents_tolerant") as m_tol,
+            patch("squad.pipeline._generate_and_copy_plans", side_effect=_make_plans),
+        ):
+            _configure_mocks(m_agent, m_tol, happy_pm_output)
+            run_pipeline(session.id, db_path=db_path, event_callback=events.append)
+
+        review = [e for e in events if e.type == EVENT_REVIEW]
+        assert len(review) == 1
+        assert review[0].plans_count == 2
+
+    def test_interviewing_event_with_pending_count(self, db_path, session):
+        from squad.models import EVENT_INTERVIEWING
+
+        paused_output = (
+            '```json\n{"questions": [{"id": "q1", "question": "A?"}, '
+            '{"id": "q2", "question": "B?"}], "needs_pause": true}\n```'
+        )
+        events = []
+        with (
+            patch("squad.pipeline.run_agent", return_value=paused_output),
+            patch("squad.pipeline.run_agents_tolerant"),
+        ):
+            run_pipeline(session.id, db_path=db_path, event_callback=events.append)
+
+        paused = [e for e in events if e.type == EVENT_INTERVIEWING]
+        assert len(paused) == 1
+        assert paused[0].pending_questions == 2
+        assert paused[0].phase == PHASE_CADRAGE
+
+    def test_failed_event_persists_and_emits_reason(self, db_path, session):
+        from squad.models import EVENT_FAILED
+
+        events = []
+        with patch("squad.pipeline.run_agent", side_effect=AgentError("pm exploded")):
+            with pytest.raises((PipelineError, AgentError)):
+                run_pipeline(session.id, db_path=db_path, event_callback=events.append)
+
+        failed = [e for e in events if e.type == EVENT_FAILED]
+        assert len(failed) == 1
+        assert "pm exploded" in (failed[0].failure_reason or "")
+        persisted = get_session(session.id, db_path=db_path)
+        assert persisted.status == "failed"
+        assert "pm exploded" in (persisted.failure_reason or "")
+
+    def test_callback_error_does_not_break_pipeline(
+        self, db_path, session, happy_pm_output
+    ):
+        def _bad_cb(evt):
+            raise RuntimeError("sink down")
+
+        with (
+            patch("squad.pipeline.run_agent") as m_agent,
+            patch("squad.pipeline.run_agents_tolerant") as m_tol,
+        ):
+            _configure_mocks(m_agent, m_tol, happy_pm_output)
+            run_pipeline(session.id, db_path=db_path, event_callback=_bad_cb)
+
+        updated = get_session(session.id, db_path=db_path)
+        assert updated.status == "review"
+
+    def test_no_callback_is_backwards_compatible(
+        self, db_path, session, happy_pm_output
+    ):
+        # Running without event_callback must keep existing behavior (smoke test).
+        with (
+            patch("squad.pipeline.run_agent") as m_agent,
+            patch("squad.pipeline.run_agents_tolerant") as m_tol,
+        ):
+            _configure_mocks(m_agent, m_tol, happy_pm_output)
+            run_pipeline(session.id, db_path=db_path)
+        updated = get_session(session.id, db_path=db_path)
+        assert updated.status == "review"
+
+    def test_plan_generation_failure_persists_reason_and_emits(
+        self, db_path, session, happy_pm_output
+    ):
+        from squad.models import EVENT_FAILED
+
+        events = []
+        with (
+            patch("squad.pipeline.run_agent") as m_agent,
+            patch("squad.pipeline.run_agents_tolerant") as m_tol,
+            patch(
+                "squad.pipeline._generate_and_copy_plans",
+                side_effect=ValueError("no synthese contract"),
+            ),
+        ):
+            _configure_mocks(m_agent, m_tol, happy_pm_output)
+            with pytest.raises(PipelineError):
+                run_pipeline(session.id, db_path=db_path, event_callback=events.append)
+
+        failed = [e for e in events if e.type == EVENT_FAILED]
+        assert len(failed) == 1
+        assert "Plan generation failed" in (failed[0].failure_reason or "")
+        persisted = get_session(session.id, db_path=db_path)
+        assert persisted.status == "failed"
+        assert "Plan generation failed" in (persisted.failure_reason or "")

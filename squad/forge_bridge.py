@@ -17,7 +17,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from squad.constants import STATUS_QUEUED
+from squad.constants import STATUS_APPROVED, STATUS_QUEUED, STATUS_REVIEW
 from squad.db import get_session, list_plans, update_session_status
 
 logger = logging.getLogger(__name__)
@@ -168,3 +168,25 @@ def submit_session_to_forge(
         queue_started,
     )
     return SubmitOutcome(plans_sent=len(plans), queue_started=queue_started)
+
+
+def approve_and_submit(
+    session_id: str,
+    db_path: Path | None = None,
+    start_queue: bool = True,
+) -> SubmitOutcome:
+    """Transition a session to ``approved`` and submit its plans to Forge.
+
+    Shared by the Slack ``Approuver`` button and (potentially) future
+    callers: drives ``STATUS_APPROVED`` → ``submit_session_to_forge`` →
+    ``STATUS_QUEUED`` on success; reverts to ``STATUS_REVIEW`` and
+    re-raises on any Forge error so the caller can decide how to notify
+    (Slack message, CLI error, etc.).
+    """
+    update_session_status(session_id, STATUS_APPROVED, db_path=db_path)
+    try:
+        return submit_session_to_forge(session_id, db_path=db_path, start_queue=start_queue)
+    except (ForgeUnavailable, ForgeQueueBusy, ValueError):
+        # Undo the approved transition so the session is driveable again.
+        update_session_status(session_id, STATUS_REVIEW, db_path=db_path)
+        raise
