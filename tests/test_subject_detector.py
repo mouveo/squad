@@ -198,14 +198,22 @@ class TestAgentSelectionRules:
 
 
 class TestDepthRules:
-    def test_no_market_signals_is_light(self):
-        assert default_depth_for_signals(set()) == RESEARCH_DEPTH_LIGHT
+    def test_no_signals_defaults_to_normal(self):
+        # A short/under-specified idea (zero detected signals) must NOT
+        # skip the benchmark: absence of signals != internal tooling.
+        assert default_depth_for_signals(set()) == RESEARCH_DEPTH_NORMAL
 
     def test_few_market_signals_is_normal(self):
         assert default_depth_for_signals({"ai"}) == RESEARCH_DEPTH_NORMAL
 
     def test_many_market_signals_is_deep(self):
         assert default_depth_for_signals({"b2b", "ai", "pricing"}) == RESEARCH_DEPTH_DEEP
+
+    def test_light_never_returned_by_deterministic_fallback(self):
+        # `light` is reachable only via an explicit Claude classification;
+        # the deterministic path never produces it.
+        for signals in [set(), {"ai"}, {"b2b"}, {"b2b", "ai", "pricing", "growth"}]:
+            assert default_depth_for_signals(signals) != RESEARCH_DEPTH_LIGHT
 
 
 # ── default_subject_type ───────────────────────────────────────────────────────
@@ -324,12 +332,32 @@ class TestDetectAndPersist:
         assert get_session(s.id, db_path).subject_type == "overridden"
 
     def test_light_depth_marks_benchmark_skipped(self, db_path, project_dir):
-        s = _session(db_path, "generic idea with no market signals", project_dir)
-        profile = detect_and_persist(s.id, use_llm=False, db_path=db_path)
+        # `light` is reachable only through an explicit Claude
+        # classification now (internal tooling judgement). Mock it here
+        # to assert that the skip-benchmark wiring still fires when the
+        # depth actually is `light`.
+        s = _session(db_path, "Internal admin script", project_dir)
+        fake = {
+            "subject_type": "internal_tool",
+            "research_depth": "light",
+            "agents_by_phase": {},
+        }
+        with patch("squad.subject_detector.run_task_json", return_value=fake):
+            profile = detect_and_persist(s.id, use_llm=True, db_path=db_path)
         assert profile.research_depth == RESEARCH_DEPTH_LIGHT
         fetched = get_session(s.id, db_path)
         assert PHASE_BENCHMARK in fetched.skipped_phases
         assert "light" in fetched.skipped_phases[PHASE_BENCHMARK].lower()
+
+    def test_under_specified_idea_does_not_skip_benchmark(self, db_path, project_dir):
+        # Regression guard for the "short idea = no benchmark" paradox.
+        # A vague 3-word idea with zero detected signals must still run
+        # the benchmark phase (depth=normal, not light).
+        s = _session(db_path, "generic idea with no market signals", project_dir)
+        profile = detect_and_persist(s.id, use_llm=False, db_path=db_path)
+        assert profile.research_depth == RESEARCH_DEPTH_NORMAL
+        fetched = get_session(s.id, db_path)
+        assert PHASE_BENCHMARK not in fetched.skipped_phases
 
     def test_normal_depth_leaves_benchmark_active(self, db_path, project_dir):
         s = _session(db_path, "Build a B2B SaaS with pricing", project_dir)

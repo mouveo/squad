@@ -242,9 +242,16 @@ def default_depth_for_signals(signals: set[str]) -> str:
 
     - ``deep`` when the subject spans several strategic signals (b2b + ai,
       integration + pricing, etc.) — broad positioning work warranted.
-    - ``light`` when the signals are internal-tooling-only (none of the
-      market-facing ones).
-    - ``normal`` otherwise.
+    - ``normal`` otherwise — and as the safe default when no market
+      signals are detected.
+
+    ``light`` is never returned by the deterministic fallback: the
+    absence of signals often means the idea is under-specified, not that
+    it is internal tooling. Skipping the benchmark in that case produces
+    shallow plans. The ``light`` depth remains reachable only via an
+    explicit Claude classification (see ``classify_with_claude``), where
+    the prompt demands a deliberate "internal tooling, no market
+    surface" judgement.
     """
     market_signals = {
         SIGNAL_B2B,
@@ -257,8 +264,6 @@ def default_depth_for_signals(signals: set[str]) -> str:
     hits = signals & market_signals
     if len(hits) >= 3:
         return RESEARCH_DEPTH_DEEP
-    if not hits:
-        return RESEARCH_DEPTH_LIGHT
     return RESEARCH_DEPTH_NORMAL
 
 
@@ -303,7 +308,13 @@ def _build_classification_prompt(idea: str, inspection: dict[str, str], signals:
         "Return a single JSON object with exactly these fields:\n"
         '- "subject_type": short label (snake_case, e.g. b2b_saas, ai_product, '
         "consumer_product, internal_tool).\n"
-        '- "research_depth": one of "light", "normal", "deep".\n'
+        '- "research_depth": one of "light", "normal", "deep". Use "light" '
+        "ONLY when the subject is an internal tool with no market-facing "
+        'surface (admin dashboard, team-only CRUD, private script). Use '
+        '"deep" when the idea spans several strategic axes (B2B + AI, '
+        "integration + pricing, new segment + GTM). When in doubt or when "
+        'the idea is short/under-specified, return "normal" — a shallow '
+        "benchmark is always better than no benchmark.\n"
         '- "agents_by_phase": object mapping phase id to an array of agent '
         "slugs. Phases: etat_des_lieux (customer-success, data, sales, ux), "
         "conception (ai-lead, architect, growth, ux), challenge "
