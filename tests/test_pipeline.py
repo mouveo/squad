@@ -1,6 +1,7 @@
 """Tests for squad/pipeline.py — happy path, pause, retry, resume, failures."""
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -132,9 +133,14 @@ class TestHappyPath:
                 results[a] = f"# {a} / {phase}"
             return results, {}
 
+        def _record_research(session_id, extra_context=None, db_path=None, **kwargs):
+            calls.append(("benchmark", "research"))
+            return SimpleNamespace(content="# research / benchmark")
+
         with (
             patch("squad.pipeline.run_agent", side_effect=_record_agent),
             patch("squad.pipeline.run_agents_tolerant", side_effect=_record_tolerant),
+            patch("squad.pipeline.run_research", side_effect=_record_research),
         ):
             run_pipeline(session.id, db_path=db_path)
 
@@ -155,9 +161,13 @@ class TestHappyPath:
         assert updated.current_phase == PHASES[-1]
 
     def test_phase_outputs_persisted_with_attempt(self, db_path, session, happy_pm_output):
+        def _fake_research(session_id, extra_context=None, db_path=None, **kwargs):
+            return SimpleNamespace(content="# research / benchmark")
+
         with (
             patch("squad.pipeline.run_agent") as m_agent,
             patch("squad.pipeline.run_agents_tolerant") as m_tol,
+            patch("squad.pipeline.run_research", side_effect=_fake_research),
         ):
             _configure_mocks(m_agent, m_tol, happy_pm_output)
             run_pipeline(session.id, db_path=db_path)

@@ -135,6 +135,7 @@ def _run_agents(
     session_id: str,
     cumulative_context: str,
     phase_instruction: str | None,
+    db_path: Path | None = None,
 ) -> tuple[dict[str, str], dict[str, str]]:
     """Execute the configured agents for a phase and return (results, errors).
 
@@ -164,6 +165,7 @@ def _run_agents(
                 report = run_research(
                     session_id=session_id,
                     extra_context=cumulative_context,
+                    db_path=db_path,
                 )
                 results[agent] = report.content
                 continue
@@ -252,7 +254,9 @@ def run_phase(
     )
 
     context = build_cumulative_context(session_id, phase, db_path=db_path)
-    results, errors = _run_agents(cfg, session_id, context, phase_instruction)
+    results, errors = _run_agents(
+        cfg, session_id, context, phase_instruction, db_path=db_path
+    )
 
     # Persist every successful deliverable before any flow-control decision.
     for agent, output in results.items():
