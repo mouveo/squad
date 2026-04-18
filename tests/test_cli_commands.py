@@ -617,6 +617,47 @@ class TestInitCommand:
         assert not (_isolated_squad_home / ".squad" / "config.yaml").exists()
 
 
+# ── squad serve (LOT 1 — Plan 4) ──────────────────────────────────────────────
+
+
+class TestServeCommand:
+    def test_missing_bot_token_fails_with_clear_error(
+        self, runner: CliRunner, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.delenv("SQUAD_SLACK_BOT_TOKEN", raising=False)
+        monkeypatch.delenv("SQUAD_SLACK_APP_TOKEN", raising=False)
+        from squad import slack_app as _slack_app
+
+        with (
+            patch("squad.cli.get_global_db_path", return_value=db_path),
+            patch.object(_slack_app, "load_config", return_value={}),
+        ):
+            result = runner.invoke(cli, ["serve"], catch_exceptions=False)
+        assert result.exit_code != 0
+        combined = result.output.lower()
+        assert "bot_token" in combined or "app_token" in combined
+
+    def test_missing_app_token_fails_with_clear_error(
+        self, runner: CliRunner, db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("SQUAD_SLACK_BOT_TOKEN", "xoxb-bot")
+        monkeypatch.delenv("SQUAD_SLACK_APP_TOKEN", raising=False)
+        # Patch load_config in slack_app since run_serve calls it directly
+        from squad import slack_app as _slack_app
+
+        with (
+            patch("squad.cli.get_global_db_path", return_value=db_path),
+            patch.object(
+                _slack_app,
+                "load_config",
+                return_value={"slack": {"bot_token": "xoxb-bot"}},
+            ),
+        ):
+            result = runner.invoke(cli, ["serve"], catch_exceptions=False)
+        assert result.exit_code != 0
+        assert "app_token" in result.output.lower()
+
+
 # ── start: config-driven --mode (LOT 1 — Plan 3) ──────────────────────────────
 
 

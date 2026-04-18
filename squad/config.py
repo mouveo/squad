@@ -64,6 +64,18 @@ mode: approval
 # Slack notifications (squad.notifier).
 slack:
   # webhook: ${SQUAD_SLACK_WEBHOOK}
+  #
+  # Interactive Slack app — `squad serve` (Socket Mode).
+  # bot_token: ${SQUAD_SLACK_BOT_TOKEN}
+  # app_token: ${SQUAD_SLACK_APP_TOKEN}
+  #
+  # Allowlist of Slack user IDs permitted to drive Squad (empty = no allowlist).
+  # allowed_user_ids: []
+  #
+  # Map a Slack channel ID to the local project path Squad should target.
+  # channels:
+  #   C0123456789:
+  #     project_path: /absolute/path/to/project
 
 # Forge integration.
 forge:

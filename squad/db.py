@@ -60,6 +60,9 @@ def _to_session(row: dict) -> Session:
         phase_attempts=_decode_json(row.get("phase_attempts"), {}),
         challenge_retry_count=int(row.get("challenge_retry_count") or 0),
         skipped_phases=_decode_json(row.get("skipped_phases"), {}),
+        slack_channel=row.get("slack_channel"),
+        slack_thread_ts=row.get("slack_thread_ts"),
+        slack_user_id=row.get("slack_user_id"),
     )
 
 
@@ -129,6 +132,10 @@ def ensure_schema(db_path: Path | None = None) -> None:
             "phase_attempts": str,
             "challenge_retry_count": int,
             "skipped_phases": str,
+            # Slack origin (Plan 4 — LOT 1)
+            "slack_channel": str,
+            "slack_thread_ts": str,
+            "slack_user_id": str,
         },
         pk="id",
         not_null={"title", "project_path", "workspace_path", "idea", "status"},
@@ -146,6 +153,9 @@ def ensure_schema(db_path: Path | None = None) -> None:
         ("agents_by_phase", str),
         ("phase_attempts", str),
         ("skipped_phases", str),
+        ("slack_channel", str),
+        ("slack_thread_ts", str),
+        ("slack_user_id", str),
     ):
         if col not in session_cols:
             db["sessions"].add_column(col, col_type)
@@ -220,6 +230,9 @@ def create_session(
     mode: str = MODE_APPROVAL,
     db_path: Path | None = None,
     session_id: str | None = None,
+    slack_channel: str | None = None,
+    slack_thread_ts: str | None = None,
+    slack_user_id: str | None = None,
 ) -> Session:
     """Insert a new session and return it."""
     db = _open(db_path)
@@ -241,6 +254,9 @@ def create_session(
         "phase_attempts": None,
         "challenge_retry_count": 0,
         "skipped_phases": None,
+        "slack_channel": slack_channel,
+        "slack_thread_ts": slack_thread_ts,
+        "slack_user_id": slack_user_id,
     }
     db["sessions"].insert(row)
     return _to_session(row)
@@ -268,6 +284,19 @@ def update_session_status(
     if current_phase is not None:
         updates["current_phase"] = current_phase
     db["sessions"].update(session_id, updates)
+
+
+def update_session_slack_thread(
+    session_id: str,
+    slack_thread_ts: str,
+    db_path: Path | None = None,
+) -> None:
+    """Persist the Slack thread timestamp once the root message has been posted."""
+    db = _open(db_path)
+    db["sessions"].update(
+        session_id,
+        {"slack_thread_ts": slack_thread_ts, "updated_at": _now()},
+    )
 
 
 def list_active_sessions(db_path: Path | None = None) -> list[Session]:

@@ -68,6 +68,10 @@ class Session:
     challenge_retry_count: int = 0
     # Phase id → skip reason (benchmark on light depth, etc.)
     skipped_phases: dict[str, str] = field(default_factory=dict)
+    # Slack origin (set only when the session was created from Slack)
+    slack_channel: str | None = None
+    slack_thread_ts: str | None = None
+    slack_user_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in SESSION_STATUSES:

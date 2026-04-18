@@ -317,3 +317,34 @@ class TestSubjectProfile:
 class TestResearchDepthConstants:
     def test_all_depths_present(self):
         assert set(RESEARCH_DEPTHS) == {"light", "normal", "deep"}
+
+
+# ── Slack origin fields (LOT 1 — Plan 4) ──────────────────────────────────────
+
+
+class TestSessionSlackFields:
+    def _make(self, **kwargs) -> Session:
+        defaults = dict(
+            id="sess-1",
+            title="Test",
+            project_path="/tmp/proj",
+            workspace_path="/tmp/proj/.squad/sessions/sess-1",
+            idea="x",
+        )
+        return Session(**{**defaults, **kwargs})
+
+    def test_slack_defaults_are_none(self):
+        s = self._make()
+        assert s.slack_channel is None
+        assert s.slack_thread_ts is None
+        assert s.slack_user_id is None
+
+    def test_slack_fields_roundtrip(self):
+        s = self._make(
+            slack_channel="C999",
+            slack_thread_ts="1700000000.000100",
+            slack_user_id="U123",
+        )
+        assert s.slack_channel == "C999"
+        assert s.slack_thread_ts == "1700000000.000100"
+        assert s.slack_user_id == "U123"
