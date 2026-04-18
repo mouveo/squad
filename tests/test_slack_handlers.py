@@ -333,15 +333,15 @@ class TestFileShared:
             )
         m_download.assert_not_called()
 
-    def test_no_thread_share_but_channel_hint_posts_helpful_message(
+    def test_no_thread_share_and_no_recent_session_posts_helpful_hint(
         self, db_path, config, executor, client
     ):
+        """When the channel has no recent session, the helpful hint is posted."""
         cfg = self._config_with_token(config)
-        _slack_session(db_path, cfg, executor, client)
+        # Deliberately NO _slack_session(...) call — empty DB.
         client.files_info.return_value = {
             "file": {"id": "F123", "name": "brief.md", "size": 10, "shares": {}}
         }
-        # Drop previous chat_postMessage calls from session creation noise.
         client.chat_postMessage.reset_mock()
         handle_file_shared(
             event={"file_id": "F123", "channel_id": "C999", "user_id": "U123"},
@@ -355,6 +355,48 @@ class TestFileShared:
             if "thread de la session" in (c.kwargs.get("text", "") or "")
         ]
         assert hints, "should post a hint when file dropped outside a thread"
+
+    def test_no_thread_share_auto_attaches_to_recent_session(
+        self, db_path, config, executor, client, tmp_path
+    ):
+        """When `/squad new` is fired with a file attached, Slack emits the
+        file_shared event against the main channel (no thread yet). The
+        handler must auto-attach to the most recent session on that
+        channel."""
+        cfg = self._config_with_token(config)
+        session = _slack_session(db_path, cfg, executor, client)
+        client.files_info.return_value = {
+            "file": {
+                "id": "F123",
+                "name": "deepsearch.md",
+                "size": 120,
+                "mimetype": "text/markdown",
+                "url_private_download": "https://files.slack.com/x",
+                "shares": {},
+            }
+        }
+        client.chat_postMessage.reset_mock()
+        with patch(
+            "squad.slack_handlers.download_file", return_value=b"# deepsearch\n\nhi"
+        ):
+            handle_file_shared(
+                event={"file_id": "F123", "channel_id": "C999", "user_id": "U123"},
+                client=client,
+                db_path=db_path,
+                config=cfg,
+            )
+        # No "drop in thread" hint — we found a recent session and attached.
+        hints = [
+            c
+            for c in client.chat_postMessage.call_args_list
+            if "thread de la session" in (c.kwargs.get("text", "") or "")
+        ]
+        assert not hints, "should NOT post hint when recent session was found"
+        # Success message posted and file actually stored on disk.
+        texts = [c.kwargs.get("text", "") for c in client.chat_postMessage.call_args_list]
+        assert any("attaché" in t for t in texts)
+        stored = _Path(session.workspace_path) / "attachments"
+        assert list(stored.iterdir()), "file should be written to attachments/"
 
     def test_thread_without_matching_session_posts_warning(
         self, db_path, config, executor, client

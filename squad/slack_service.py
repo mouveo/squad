@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from sqlite_utils import Database
@@ -308,6 +309,56 @@ def find_session_by_thread(
         db["sessions"].rows_where(
             "slack_channel = ? AND slack_thread_ts = ?",
             [channel_id, thread_ts],
+            limit=1,
+        )
+    )
+    if not rows:
+        return None
+    return _to_session(dict(rows[0]))
+
+
+# Default grace window used by ``find_recent_session_by_channel``.
+# A file dropped together with ``/squad new`` lands in the main channel
+# a fraction of a second before Slack dispatches the bot reply that
+# creates the thread. 2 minutes gives a comfortable margin for slow
+# clients and for the file upload itself, without matching unrelated
+# sessions that lived in the channel earlier.
+_RECENT_SESSION_WINDOW_SECONDS: int = 120
+
+
+def find_recent_session_by_channel(
+    channel_id: str,
+    *,
+    max_age_seconds: int = _RECENT_SESSION_WINDOW_SECONDS,
+    db_path: Path | None = None,
+) -> Session | None:
+    """Return the most recent session created on ``channel_id`` within the window.
+
+    Fallback used by the ``file_shared`` handler when a file landed in
+    the main channel (no thread share yet) but a session was just
+    created on the same channel. This covers the "`/squad new` + file
+    attachment in one shot" UX: Slack fires the file event before the
+    bot has time to reply and create the session thread, so the file
+    cannot match on ``slack_thread_ts`` — we match on channel recency
+    instead.
+
+    Sessions older than ``max_age_seconds`` are ignored. Only sessions
+    in ``draft``, ``working`` or ``interviewing`` statuses are
+    considered — completed sessions shouldn't absorb stray files.
+    """
+    if not channel_id:
+        return None
+    path = db_path or get_global_db_path()
+    db = Database(path)
+    if "sessions" not in db.table_names():
+        return None
+    cutoff = (datetime.utcnow() - timedelta(seconds=max_age_seconds)).isoformat()
+    rows = list(
+        db["sessions"].rows_where(
+            "slack_channel = ? AND created_at >= ? "
+            "AND status IN ('draft', 'working', 'interviewing')",
+            [channel_id, cutoff],
+            order_by="created_at desc",
             limit=1,
         )
     )

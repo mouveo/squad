@@ -37,7 +37,7 @@ from squad.forge_bridge import (
     ForgeUnavailable,
     approve_and_submit,
 )
-from squad.models import EVENT_INTERVIEWING, EVENT_REVIEW, PipelineEvent
+from squad.models import EVENT_INTERVIEWING, EVENT_REVIEW, PipelineEvent, Session
 from squad.pipeline import PipelineError, resume_pipeline, run_pipeline
 from squad.slack_service import (
     ANGLE_PICK_ACTION_ID,
@@ -56,6 +56,7 @@ from squad.slack_service import (
     create_session_from_slack,
     extract_modal_answer,
     extract_reject_reason,
+    find_recent_session_by_channel,
     find_session_by_thread,
     format_root_message,
     parse_pick_all_value,
@@ -400,56 +401,78 @@ def handle_file_shared(
     )
 
     channel_id, thread_ts = _resolve_thread_ts_from_shares(file_info)
-    if not channel_id or not thread_ts:
-        logger.warning(
-            "file %s has no thread share — ignored (shares=%s)",
-            file_id,
-            file_info.get("shares"),
-        )
-        # User-facing hint in the originating channel so the PO knows why
-        # nothing happened. Best-effort; failures are logged but ignored.
-        try:
-            if channel_hint:
-                client.chat_postMessage(
-                    channel=channel_hint,
-                    text=(
-                        ":information_source: Pour joindre un fichier à une session Squad, "
-                        "glissez-le dans le *thread de la session* (cliquez sur le message "
-                        "« Session créée » puis `Reply`), pas dans le channel principal."
-                    ),
-                )
-        except Exception:
-            logger.exception("Could not post no-thread hint to channel %s", channel_hint)
-        return
-
-    logger.info(
-        "file %s thread resolved — channel=%s thread_ts=%s",
-        file_id,
-        channel_id,
-        thread_ts,
-    )
-
-    session = find_session_by_thread(channel_id, thread_ts, db_path=db_path)
-    if session is None:
-        logger.warning(
-            "file %s shared in %s/%s but no Squad session matches",
+    session: Session | None = None
+    if channel_id and thread_ts:
+        logger.info(
+            "file %s thread resolved — channel=%s thread_ts=%s",
             file_id,
             channel_id,
             thread_ts,
         )
-        try:
-            client.chat_postMessage(
-                channel=channel_id,
-                thread_ts=thread_ts,
-                text=(
-                    ":warning: Aucune session Squad active ne correspond à ce thread — "
-                    "le fichier ne sera pas injecté dans le contexte des agents. "
-                    "Lancez d'abord `/squad new <idée>` puis déposez le fichier dans *ce* thread."
-                ),
+        session = find_session_by_thread(channel_id, thread_ts, db_path=db_path)
+        if session is None:
+            logger.warning(
+                "file %s shared in %s/%s but no Squad session matches",
+                file_id,
+                channel_id,
+                thread_ts,
             )
-        except Exception:
-            logger.exception("Could not post no-match hint")
-        return
+            try:
+                client.chat_postMessage(
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    text=(
+                        ":warning: Aucune session Squad active ne correspond à ce thread — "
+                        "le fichier ne sera pas injecté dans le contexte des agents. "
+                        "Lancez d'abord `/squad new <idée>` puis déposez le fichier "
+                        "dans *ce* thread."
+                    ),
+                )
+            except Exception:
+                logger.exception("Could not post no-match hint")
+            return
+    else:
+        # No thread share. Most common cause: the file was dropped in
+        # the main channel together with `/squad new`, before the bot
+        # had time to reply and create the session thread. Fall back to
+        # the most recent session on the originating channel (within a
+        # 2-minute window). If one matches, attach the file to it.
+        fallback_channel = channel_hint
+        session = (
+            find_recent_session_by_channel(fallback_channel, db_path=db_path)
+            if fallback_channel
+            else None
+        )
+        if session is None:
+            logger.warning(
+                "file %s has no thread share and no recent session on %s — ignored "
+                "(shares=%s)",
+                file_id,
+                fallback_channel,
+                file_info.get("shares"),
+            )
+            try:
+                if channel_hint:
+                    client.chat_postMessage(
+                        channel=channel_hint,
+                        text=(
+                            ":information_source: Pour joindre un fichier à une "
+                            "session Squad, glissez-le dans le *thread de la "
+                            "session* (cliquez sur le message « Session créée » "
+                            "puis `Reply`), pas dans le channel principal."
+                        ),
+                    )
+            except Exception:
+                logger.exception(
+                    "Could not post no-thread hint to channel %s", channel_hint
+                )
+            return
+        logger.info(
+            "file %s auto-attached to recent session %s on channel %s (no thread share)",
+            file_id,
+            session.id,
+            fallback_channel,
+        )
 
     logger.info(
         "file %s matched session %s — starting validation + download",

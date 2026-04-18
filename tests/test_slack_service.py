@@ -20,6 +20,7 @@ from squad.slack_service import (
     assert_user_allowed,
     create_session_from_slack,
     discover_project_path,
+    find_recent_session_by_channel,
     format_pipeline_event,
     format_root_message,
     post_pipeline_event,
@@ -151,6 +152,64 @@ class TestDiscoverProjectPath:
         (dev / "ab").mkdir()  # too short (< 3 chars)
         cfg = {"dev_root": str(dev)}
         assert discover_project_path("ab update", cfg) is None
+
+
+# ── find_recent_session_by_channel ────────────────────────────────────────────
+
+
+class TestFindRecentSessionByChannel:
+    def test_returns_latest_session_on_channel(self, db_path, config):
+        s = create_session_from_slack(
+            idea="idea 1",
+            channel_id="C999",
+            user_id="U123",
+            db_path=db_path,
+            config=config,
+        )
+        found = find_recent_session_by_channel("C999", db_path=db_path)
+        assert found is not None
+        assert found.id == s.id
+
+    def test_returns_none_when_no_session_on_channel(self, db_path, config):
+        create_session_from_slack(
+            idea="idea",
+            channel_id="C999",
+            user_id="U123",
+            db_path=db_path,
+            config=config,
+        )
+        assert find_recent_session_by_channel("COTHER", db_path=db_path) is None
+
+    def test_ignores_sessions_older_than_window(self, db_path, config):
+        s = create_session_from_slack(
+            idea="old",
+            channel_id="C999",
+            user_id="U123",
+            db_path=db_path,
+            config=config,
+        )
+        # Backdate the row so it falls out of the default 120s window.
+        from sqlite_utils import Database
+
+        db = Database(db_path)
+        db["sessions"].update(s.id, {"created_at": "2020-01-01T00:00:00"})
+        assert find_recent_session_by_channel("C999", db_path=db_path) is None
+
+    def test_ignores_completed_sessions(self, db_path, config):
+        s = create_session_from_slack(
+            idea="done",
+            channel_id="C999",
+            user_id="U123",
+            db_path=db_path,
+            config=config,
+        )
+        from squad.db import update_session_status
+
+        update_session_status(s.id, "review", db_path=db_path)
+        assert find_recent_session_by_channel("C999", db_path=db_path) is None
+
+    def test_empty_channel_id_returns_none(self, db_path):
+        assert find_recent_session_by_channel("", db_path=db_path) is None
 
 
 # ── assert_user_allowed ────────────────────────────────────────────────────────
