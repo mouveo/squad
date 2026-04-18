@@ -33,7 +33,7 @@ from squad.attachment_service import (
     INLINE_TEXT_EXTENSIONS,
     list_attachments,
 )
-from squad.config import get_global_db_path
+from squad.config import get_config_value, get_global_db_path
 from squad.constants import (
     PHASE_BENCHMARK,
     PHASE_CHALLENGE,
@@ -49,10 +49,30 @@ from squad.workspace import get_context
 
 logger = logging.getLogger(__name__)
 
-# Soft ceiling: ~15 000 tokens at 4 chars / token
+# Soft ceiling: ~15 000 tokens at 4 chars / token. Kept as a module-level
+# fallback for callers that pre-date the config-driven budget; the live
+# value is resolved through ``get_config_value("pipeline.context_budget_chars")``
+# in ``build_cumulative_context``.
 _TARGET_CHARS = 60_000
+_CONTEXT_BUDGET_KEY = "pipeline.context_budget_chars"
 # Budget reserved for research/benchmark text within the cumulative context
 _RESEARCH_MAX_CHARS = 16_000
+
+# Markers used by the budget-enforcement layer.
+_COMPRESSED_PHASE_MARKER = (
+    "*[Phase résumée pour tenir le budget — contenu complet dans le workspace.]*"
+)
+_OMITTED_PHASE_MARKER = (
+    "*[Historique omis pour tenir le budget — voir workspace.]*"
+)
+# Cap applied to the first paragraph when summarising a phase section so
+# a single verbose block cannot defeat the compression step.
+_COMPRESSED_FIRST_PARAGRAPH_CHARS = 800
+
+# Emitted only in the pathological case where the protected payload alone
+# (idea, context, Q&A, attachments, angle, constraints, last two phases)
+# already exceeds the budget.
+FINAL_TRUNCATION_MARKER = "[… contexte tronqué au-delà du budget]"
 
 # Per-attachment inlining budget (text files only) and per-session cap.
 _ATTACHMENT_INLINE_PER_FILE = 8_000
@@ -399,6 +419,139 @@ def _filter_latest_attempt(outputs: list[PhaseOutput]) -> list[PhaseOutput]:
 # ── private DB helper ──────────────────────────────────────────────────────────
 
 
+def compress_phase_section(section_text: str) -> str:
+    """Return a deterministic, LLM-free summary of a ``## Phase : ...`` block.
+
+    The summary keeps the phase header, extracts the first non-empty
+    paragraph of the body, and lists the ``##`` / ``###`` headings that
+    appear inside the agent deliverables. A closing marker signals that
+    the section was compressed so downstream agents know the content was
+    intentionally reduced.
+    """
+    lines = section_text.splitlines()
+    if not lines:
+        return section_text
+    header = lines[0]
+    body = "\n".join(lines[1:])
+
+    # First useful paragraph: skip the ones that are only markdown
+    # headings, so a body starting with ``### agent\n\nreal prose``
+    # returns the prose rather than the agent header. Cap the paragraph
+    # so a single verbose block cannot blow the compressed summary.
+    paragraphs = [p.strip() for p in body.split("\n\n") if p.strip()]
+    first_para = next(
+        (
+            p
+            for p in paragraphs
+            if not all(line.strip().startswith("#") for line in p.splitlines() if line.strip())
+        ),
+        "",
+    )
+    if len(first_para) > _COMPRESSED_FIRST_PARAGRAPH_CHARS:
+        first_para = (
+            first_para[:_COMPRESSED_FIRST_PARAGRAPH_CHARS].rstrip() + "…"
+        )
+
+    # Detected sub-headings, excluding the phase header itself.
+    titles = [
+        match.strip()
+        for match in re.findall(r"^#{2,3}\s+[^\n]+$", body, re.MULTILINE)
+    ]
+
+    out: list[str] = [header, ""]
+    if first_para:
+        out.append(first_para)
+        out.append("")
+    if titles:
+        out.append("Titres détectés :")
+        for title in titles:
+            out.append(f"- {title}")
+        out.append("")
+    out.append(_COMPRESSED_PHASE_MARKER)
+    return "\n".join(out).rstrip() + "\n"
+
+
+def _enforce_context_budget(
+    protected_parts: list[str],
+    phase_sections: list[tuple[str, str]],
+    budget: int,
+    *,
+    session_id: str,
+    current_phase: str,
+) -> str:
+    """Join protected parts + phase sections under ``budget`` characters.
+
+    Compression is staged: (1) summarise the oldest phase sections while
+    keeping the two most recent phases untouched, logging the char gain
+    per phase at INFO level; (2) if still over budget, drop the already
+    compressed summaries from oldest to newest, replacing each one with
+    an explicit omission marker; (3) if the protected payload alone (the
+    parts that are never compressed plus the two newest phases) is still
+    over budget, log a WARNING and truncate the final string, appending
+    :data:`FINAL_TRUNCATION_MARKER`.
+    """
+    separator = "\n\n---\n\n"
+
+    def _join(sections: list[tuple[str, str]]) -> str:
+        return separator.join(protected_parts + [body for _, body in sections])
+
+    context = _join(phase_sections)
+    if len(context) <= budget:
+        return context
+
+    # Step 1 — compress oldest phase sections first, protecting the two
+    # most recent phases. ``compressible_max`` is the index range [0,
+    # len-2) so the last two phase sections stay intact.
+    compressible_max = max(0, len(phase_sections) - 2)
+    for idx in range(compressible_max):
+        phase_id, original = phase_sections[idx]
+        compressed = compress_phase_section(original)
+        gain = len(original) - len(compressed)
+        if gain <= 0:
+            continue
+        phase_sections[idx] = (phase_id, compressed)
+        logger.info(
+            "Context compression: phase %r saved %d chars (session=%s, current_phase=%s)",
+            phase_id,
+            gain,
+            session_id,
+            current_phase,
+        )
+        context = _join(phase_sections)
+        if len(context) <= budget:
+            return context
+
+    # Step 2 — drop the oldest compressed summaries outright, leaving
+    # only an explicit omission marker so downstream agents still see the
+    # phase happened.
+    for idx in range(compressible_max):
+        phase_id, _ = phase_sections[idx]
+        label = PHASE_LABELS.get(phase_id, phase_id)
+        phase_sections[idx] = (
+            phase_id,
+            f"## Phase : {label}\n\n{_OMITTED_PHASE_MARKER}\n",
+        )
+        context = _join(phase_sections)
+        if len(context) <= budget:
+            return context
+
+    # Step 3 — the protected payload itself is too big. Log a warning
+    # and apply a visible final truncation so the budget overflow is not
+    # silent.
+    logger.warning(
+        "Cumulative context for session %r / phase %r still exceeds budget "
+        "after compression and history omission (%d > %d chars) — applying "
+        "final truncation",
+        session_id,
+        current_phase,
+        len(context),
+        budget,
+    )
+    marker = "\n\n" + FINAL_TRUNCATION_MARKER
+    cutoff = max(0, budget - len(marker))
+    return context[:cutoff].rstrip() + marker
+
+
 def _get_answered_questions(session_id: str, db_path: Path | None) -> list[dict]:
     """Return answered Q&A rows for a session, ordered by creation date."""
     path = db_path or get_global_db_path()
@@ -484,7 +637,10 @@ def build_cumulative_context(
         all_outputs = [po for po in all_outputs if po.phase in preceding_phases]
         all_outputs = _filter_latest_attempt(all_outputs)
 
-    # Challenge constraints (parsed from blockers contracts)
+    # Challenge constraints (parsed from blockers contracts). These are
+    # curated, compact summaries derived from the blockers contract and
+    # must never be compressed away: downstream phases rely on them to
+    # honour unresolved blockers.
     constraints = extract_challenge_constraints(all_outputs)
     if constraints:
         parts.append("## Contraintes issues du challenge\n\n" + "\n".join(constraints))
@@ -494,6 +650,7 @@ def build_cumulative_context(
     for po in all_outputs:
         by_phase.setdefault(po.phase, []).append(po)
 
+    phase_sections: list[tuple[str, str]] = []
     for phase_id in preceding_phases:
         phase_outputs = by_phase.get(phase_id, [])
         if not phase_outputs:
@@ -505,17 +662,21 @@ def build_cumulative_context(
             if phase_id == PHASE_BENCHMARK:
                 content = summarize_benchmark_structured(content)
             agent_sections.append(f"### {po.agent}\n\n{content}")
-        parts.append(f"## Phase : {label}\n\n" + "\n\n".join(agent_sections))
+        section = f"## Phase : {label}\n\n" + "\n\n".join(agent_sections)
+        phase_sections.append((phase_id, section))
 
-    context = "\n\n---\n\n".join(parts)
-
-    if len(context) > _TARGET_CHARS:
-        logger.warning(
-            "Cumulative context for session %r / phase %r exceeds target (%d > %d chars)",
-            session_id,
-            current_phase,
-            len(context),
-            _TARGET_CHARS,
+    budget = int(
+        get_config_value(
+            _CONTEXT_BUDGET_KEY,
+            project_path=session.project_path,
+            default=_TARGET_CHARS,
         )
-
-    return context
+        or _TARGET_CHARS
+    )
+    return _enforce_context_budget(
+        protected_parts=parts,
+        phase_sections=phase_sections,
+        budget=budget,
+        session_id=session_id,
+        current_phase=current_phase,
+    )

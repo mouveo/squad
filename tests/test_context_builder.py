@@ -1,5 +1,6 @@
 """Tests for squad/context_builder.py — context assembly and research summarisation."""
 
+import logging
 from unittest.mock import patch
 
 import pytest
@@ -10,14 +11,17 @@ from squad.constants import (
     PHASE_CHALLENGE,
     PHASE_CONCEPTION,
     PHASE_ETAT_DES_LIEUX,
+    PHASE_IDEATION,
     PHASE_SYNTHESE,
 )
 from squad.context_builder import (
+    FINAL_TRUNCATION_MARKER,
     _RESEARCH_MAX_CHARS,
     _TARGET_CHARS,
     _filter_latest_attempt,
     _get_answered_questions,
     build_cumulative_context,
+    compress_phase_section,
     extract_challenge_constraints,
     format_qa,
     summarize_benchmark_structured,
@@ -896,3 +900,255 @@ class TestBuildCumulativeContextAngleInjection:
         ):
             ctx = build_cumulative_context("sess-test", PHASE_BENCHMARK)
         assert "## Angle choisi" not in ctx
+
+
+# ── compress_phase_section (LOT 5 — Plan 7) ───────────────────────────────────
+
+
+class TestCompressPhaseSection:
+    def test_keeps_phase_header(self):
+        section = (
+            "## Phase : cadrage\n\n"
+            "### pm\n\n"
+            "First useful paragraph of the PM deliverable.\n\n"
+            "Second paragraph.\n"
+        )
+        out = compress_phase_section(section)
+        assert out.startswith("## Phase : cadrage")
+
+    def test_extracts_first_paragraph(self):
+        section = (
+            "## Phase : cadrage\n\n"
+            "### pm\n\n"
+            "First paragraph of substance.\n\n"
+            "Second paragraph that should be dropped.\n"
+        )
+        out = compress_phase_section(section)
+        assert "First paragraph of substance." in out
+        assert "Second paragraph that should be dropped." not in out
+
+    def test_lists_detected_sub_headings(self):
+        section = (
+            "## Phase : conception\n\n"
+            "### architect\n\n"
+            "Summary prose.\n\n"
+            "## Architecture proposée\n\n"
+            "detail\n\n"
+            "### Contraintes\n\n"
+            "more detail\n"
+        )
+        out = compress_phase_section(section)
+        assert "Titres détectés" in out
+        assert "## Architecture proposée" in out
+        assert "### Contraintes" in out
+
+    def test_appends_compression_marker(self):
+        section = "## Phase : cadrage\n\n### pm\n\nprose\n"
+        out = compress_phase_section(section)
+        assert "Phase résumée pour tenir le budget" in out
+
+    def test_is_deterministic(self):
+        section = "## Phase : cadrage\n\n### pm\n\nprose\n\n## Section\n\nx\n"
+        assert compress_phase_section(section) == compress_phase_section(section)
+
+    def test_compressed_shorter_than_original_for_verbose_input(self):
+        body = "very verbose prose line. " * 500
+        section = f"## Phase : conception\n\n### architect\n\n{body}\n"
+        out = compress_phase_section(section)
+        assert len(out) < len(section)
+
+
+# ── Budget enforcement — 3 scenarios (LOT 5 — Plan 7) ─────────────────────────
+
+
+class TestBuildCumulativeContextBudgetEnforcement:
+    """Three canonical scenarios: under budget, moderate overflow, extreme overflow."""
+
+    def _outputs_for_five_phases(self, *, body_size: int) -> list[PhaseOutput]:
+        """Return outputs for the 5 phases preceding ``synthese``.
+
+        Using ``synthese`` as the current phase guarantees 5 preceding
+        phases (cadrage, etat_des_lieux, ideation, benchmark, conception,
+        challenge), which is enough to exercise "compress older, keep the
+        two most recent" logic deterministically.
+        """
+        return [
+            _make_phase_output(PHASE_CADRAGE, "pm", "A" * body_size),
+            _make_phase_output(PHASE_ETAT_DES_LIEUX, "ux", "B" * body_size),
+            _make_phase_output(PHASE_IDEATION, "ideation", "C" * body_size),
+            _make_phase_output(PHASE_BENCHMARK, "research", "D" * body_size),
+            _make_phase_output(PHASE_CONCEPTION, "architect", "E" * body_size),
+            _make_phase_output(PHASE_CHALLENGE, "security", "F" * body_size),
+        ]
+
+    def test_under_budget_returns_unchanged_content(
+        self,
+        patch_get_session,
+        patch_get_context,
+        patch_answered_questions,
+    ):
+        """Scenario 1: context fits budget → no compression, no markers."""
+        outputs = self._outputs_for_five_phases(body_size=500)
+        with (
+            patch("squad.context_builder.list_phase_outputs", return_value=outputs),
+            patch(
+                "squad.context_builder.get_config_value",
+                return_value=60_000,
+            ),
+        ):
+            ctx = build_cumulative_context("sess-test", PHASE_SYNTHESE)
+
+        assert len(ctx) <= 60_000
+        assert "Phase résumée pour tenir le budget" not in ctx
+        assert "Historique omis" not in ctx
+        assert FINAL_TRUNCATION_MARKER not in ctx
+        # Every phase body appears untouched.
+        for letter in ("A", "B", "C", "D", "E", "F"):
+            assert letter * 500 in ctx
+
+    def test_moderate_overflow_compresses_oldest_and_keeps_last_two(
+        self,
+        patch_get_session,
+        patch_get_context,
+        patch_answered_questions,
+        caplog,
+    ):
+        """Scenario 2: overflow forces compression of older phases only."""
+        # Body large enough that the 6 phases combined blow a 20k budget
+        # but not so large that any single phase alone exceeds it.
+        outputs = self._outputs_for_five_phases(body_size=4_000)
+        budget = 20_000
+
+        with (
+            caplog.at_level(logging.INFO, logger="squad.context_builder"),
+            patch("squad.context_builder.list_phase_outputs", return_value=outputs),
+            patch(
+                "squad.context_builder.get_config_value",
+                return_value=budget,
+            ),
+        ):
+            ctx = build_cumulative_context("sess-test", PHASE_SYNTHESE)
+
+        # Final context respects budget (compression path, not truncation).
+        assert len(ctx) <= budget
+        assert FINAL_TRUNCATION_MARKER not in ctx
+
+        # At least one INFO log reports compression with a char gain.
+        compression_logs = [
+            r for r in caplog.records
+            if r.levelno == logging.INFO
+            and "Context compression" in r.getMessage()
+            and "saved" in r.getMessage()
+        ]
+        assert len(compression_logs) >= 1
+
+        # The two most recent phase bodies (conception and challenge) must
+        # appear intact — they are never compressed.
+        assert "E" * 4_000 in ctx
+        assert "F" * 4_000 in ctx
+
+    def test_extreme_overflow_triggers_final_truncation_with_warning(
+        self,
+        patch_get_session,
+        patch_get_context,
+        patch_answered_questions,
+        caplog,
+    ):
+        """Scenario 3: even the protected payload is too big → warning + marker."""
+        # Huge last-two phases so even after full compression + omission
+        # of older summaries, the protected payload alone exceeds budget.
+        outputs = [
+            _make_phase_output(PHASE_CADRAGE, "pm", "A" * 2_000),
+            _make_phase_output(PHASE_ETAT_DES_LIEUX, "ux", "B" * 2_000),
+            _make_phase_output(PHASE_IDEATION, "ideation", "C" * 2_000),
+            _make_phase_output(PHASE_BENCHMARK, "research", "D" * 2_000),
+            # The two most recent are each huge — we protect them so the
+            # final size must exceed the budget.
+            _make_phase_output(PHASE_CONCEPTION, "architect", "E" * 30_000),
+            _make_phase_output(PHASE_CHALLENGE, "security", "F" * 30_000),
+        ]
+        budget = 10_000
+
+        with (
+            caplog.at_level(logging.WARNING, logger="squad.context_builder"),
+            patch("squad.context_builder.list_phase_outputs", return_value=outputs),
+            patch(
+                "squad.context_builder.get_config_value",
+                return_value=budget,
+            ),
+        ):
+            ctx = build_cumulative_context("sess-test", PHASE_SYNTHESE)
+
+        # The final context must be bounded by the budget plus the
+        # appended marker — the last truncation is explicit, not silent.
+        assert len(ctx) <= budget + len(FINAL_TRUNCATION_MARKER) + 4
+        assert ctx.rstrip().endswith(FINAL_TRUNCATION_MARKER)
+
+        # A WARNING log must explain the pathological path.
+        warning_logs = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING
+            and "final truncation" in r.getMessage()
+        ]
+        assert len(warning_logs) == 1
+
+    def test_attachments_are_never_compressed(
+        self,
+        patch_get_session,
+        patch_get_context,
+        patch_answered_questions,
+        tmp_path,
+    ):
+        """Attachments must survive compression even under heavy budget pressure."""
+        from squad.models import AttachmentMeta
+
+        attached = tmp_path / "brief.md"
+        attached.write_text("PROTECTED_ATTACHMENT_CONTENT", encoding="utf-8")
+        meta = AttachmentMeta(
+            session_id="sess-test",
+            filename="brief.md",
+            path=str(attached),
+            size_bytes=attached.stat().st_size,
+        )
+        outputs = self._outputs_for_five_phases(body_size=4_000)
+
+        with (
+            patch("squad.context_builder.list_phase_outputs", return_value=outputs),
+            patch("squad.context_builder.list_attachments", return_value=[meta]),
+            patch(
+                "squad.context_builder.get_config_value",
+                return_value=20_000,
+            ),
+        ):
+            ctx = build_cumulative_context("sess-test", PHASE_SYNTHESE)
+
+        # The attachment inline body is still present even after
+        # compression of older phases.
+        assert "PROTECTED_ATTACHMENT_CONTENT" in ctx
+        assert "## Fichiers joints" in ctx
+
+    def test_reads_budget_from_config(
+        self,
+        patch_get_session,
+        patch_get_context,
+        patch_answered_questions,
+    ):
+        """``build_cumulative_context`` must consult the config for its budget."""
+        outputs = self._outputs_for_five_phases(body_size=500)
+        captured_args = {}
+
+        def _config(*args, **kwargs):
+            captured_args["args"] = args
+            captured_args["kwargs"] = kwargs
+            return 60_000
+
+        with (
+            patch("squad.context_builder.list_phase_outputs", return_value=outputs),
+            patch("squad.context_builder.get_config_value", side_effect=_config),
+        ):
+            build_cumulative_context("sess-test", PHASE_SYNTHESE)
+
+        assert captured_args["args"][0] == "pipeline.context_budget_chars"
+        # The session's project_path must be forwarded so project-level
+        # overrides apply before global ones.
+        assert captured_args["kwargs"].get("project_path") == "/tmp/myproject"
