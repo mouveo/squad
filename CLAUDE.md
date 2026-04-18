@@ -110,6 +110,15 @@ Options importantes :
 
 Le stream NDJSON contient des lignes JSON avec `type: "text"` pour le contenu. Extraire et concaténer toutes les lignes `type: "text"` pour obtenir le résultat final.
 
+### Exploration active des projets cibles
+
+Certains agents ont besoin de lire les fichiers du projet cible pour produire un diagnostic ou une conception fidèle à la réalité du code. Cette capacité est **sélective** :
+
+- Seuls `ux` et `architect` ont `Glob`, `LS`, `Grep` activés dans leur section `## Outils autorisés` (voir `agents/ux.md` et `agents/architect.md`). Les autres agents restent cantonnés à `Read` (et, selon les cas, `WebSearch`/`WebFetch`).
+- Pour ces deux agents, `pipeline._run_agents` route `cwd=session.project_path` vers le sous-processus Claude via `executor._call_claude_cli(..., cwd=...)`. Concrètement : `run_agent(..., cwd=project_path)` en séquentiel, `run_agents_tolerant(..., cwd_by_agent={agent: cwd, ...})` en parallèle.
+- Le helper `pipeline._resolve_agent_cwd(session, agent)` n'applique ce `cwd` que si l'agent est dans `_AGENTS_WITH_PROJECT_CWD = {"ux", "architect"}` et que le chemin existe. Sinon il retombe sur `cwd=None` (avec un warning quand le chemin est déclaré mais absent).
+- Le contexte cumulatif (`build_cumulative_context`) reste partagé par phase et inclut déjà un pré-scan du projet (`CLAUDE.md`, `README`, manifests, tree, `git log`) : `Glob`/`LS`/`Grep` servent à affiner, pas à re-cartographier.
+
 ## Intégration avec Forge
 
 Squad produit des plans markdown au format Forge (`## LOT N — Titre`). Ces plans sont :

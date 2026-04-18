@@ -36,7 +36,7 @@ PHASES = [
     "etat_des_lieux",  # CS, Data, Sales, UX
     "benchmark",       # Research (service)
     "conception",      # UX, Architect, Growth, AI Lead
-    "challenge",       # Security, Delivery
+    "challenge",       # Security, Delivery, Architect
     "synthese",        # PM
 ]
 ```
@@ -52,9 +52,77 @@ Chaque phase est exécutée par `pipeline.run_phase`. Le cycle :
 3. Si le contrat de la phase contient des questions pendantes (cas du
    PM en cadrage), la phase **pause** : statut → `interviewing`.
 4. Sinon, statut → `working` et on enchaîne.
-5. Après `challenge`, si Security/Delivery a produit des blockers
-   exploitables, `recovery.can_retry_conception` autorise **un seul**
-   retour en `conception` avec une instruction enrichie.
+5. Après `challenge`, si Security / Delivery / Architect a produit des
+   blockers exploitables, `recovery.can_retry_conception` autorise
+   **un seul** retour en `conception` avec une instruction enrichie.
+
+## Exploration active
+
+Chaque phase reçoit un **contexte cumulatif partagé** produit par
+`context_builder.build_cumulative_context(session_id, phase)`. Ce
+contexte inclut, pour le projet cible, un **pré-scan** (`CLAUDE.md`,
+`README`, manifests, arborescence, `git log`) : c'est la source
+principale d'information pour tous les agents. Le contexte cumulatif
+reste **partagé par phase** — il n'est pas rendu agent-spécifique dans
+le pipeline.
+
+Deux agents — `ux` et `architect` — ont en plus une **exploration
+active** du projet cible :
+
+- `pipeline._AGENTS_WITH_PROJECT_CWD = {"ux", "architect"}` sélectionne
+  ces agents.
+- `pipeline._resolve_agent_cwd(session, agent)` retourne
+  `session.project_path` quand l'agent est dans ce set et que le
+  chemin existe ; sinon `None` (avec warning si le chemin est déclaré
+  mais absent).
+- Le `cwd` est transmis au sous-processus Claude via
+  `executor._call_claude_cli(..., cwd=...)`, agent par agent en
+  séquentiel (`run_agent(..., cwd=...)`) et via
+  `run_agents_tolerant(..., cwd_by_agent=...)` en parallèle.
+- Les tools `Glob`, `LS`, `Grep` ne sont activés que pour ces deux
+  agents (déclarés `oui` uniquement dans `agents/ux.md` et
+  `agents/architect.md`).
+
+Règle d'usage côté agent (rappelée dans `## Exploration du projet` des
+deux markdowns) : **explorer pour localiser, puis lire précisément**.
+Glob/LS/Grep servent à trouver le bon fichier ; `Read` avec
+offset/limit reste l'outil de lecture finale. Les fichiers de plus de
+500 lignes se lisent par extraits ciblés, jamais en entier.
+
+`architect` intervient non seulement en `conception` mais aussi en
+`challenge` (cf. `phase_config.PHASE_CONFIGS[PHASE_CHALLENGE]`) — son
+`cwd` suit donc l'agent, pas la phase.
+
+## Matrice agent → allowedTools
+
+Cette table reflète le **runtime réel**, c'est-à-dire le résultat de
+`executor.map_allowed_tools(parse_agent_capabilities(load_agent_definition(agent)))`
+pour les agents markdown, et l'allowlist codée dans
+`research.run_research` pour le service `research`.
+
+| Agent              | `--allowedTools` effectifs              |
+|--------------------|-----------------------------------------|
+| `pm`               | `Read`                                  |
+| `customer-success` | `Read`                                  |
+| `data`             | `Read`                                  |
+| `delivery`         | `Read`                                  |
+| `sales`            | `Read,WebSearch,WebFetch`               |
+| `security`         | `Read,WebSearch,WebFetch`               |
+| `growth`           | `Read,WebSearch,WebFetch`               |
+| `ai-lead`          | `Read,WebSearch,WebFetch`               |
+| `ux`               | `Read,WebSearch,WebFetch,Glob,LS,Grep`  |
+| `architect`        | `Read,WebSearch,WebFetch,Glob,LS,Grep`  |
+| `research`         | `Read,WebSearch,WebFetch` (via `research.py`) |
+
+Notes :
+
+- Seuls `ux` et `architect` reçoivent `Glob,LS,Grep` **et** un
+  `cwd=session.project_path` (voir § Exploration active).
+- `research` n'a pas de définition markdown : son allowlist est câblée
+  dans `squad/research.py` et passe par `executor.run_task_text`.
+- L'ordre des tools est déterministe : il suit l'ordre d'insertion de
+  `executor._CAPABILITY_TO_TOOL` (`Read`, `WebSearch`, `WebFetch`,
+  `Glob`, `LS`, `Grep`).
 
 ## Statuts d'une session
 
