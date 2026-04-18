@@ -32,6 +32,7 @@ from squad.constants import (
     PHASE_CADRAGE,
     PHASE_CHALLENGE,
     PHASE_CONCEPTION,
+    PHASE_IDEATION,
     PHASES,
     STATUS_FAILED,
     STATUS_INTERVIEWING,
@@ -66,6 +67,11 @@ from squad.phase_config import (
     iter_phases,
 )
 from squad.research import run_research
+
+try:  # LOT 3 ships squad.ideation; until then the pipeline falls back gracefully.
+    from squad.ideation import run_ideation as _run_ideation
+except ImportError:  # pragma: no cover — exercised indirectly in tests
+    _run_ideation = None
 from squad.phase_contracts import (
     ContractError,
     QuestionsContract,
@@ -205,6 +211,17 @@ def _run_agents(
                 results[agent] = report.content
                 continue
 
+            # The ideation phase delegates to the dedicated ideation service.
+            # Non-critical: any failure falls back to a trivial synthetic
+            # output so the downstream phases still have something to chew on.
+            if cfg.phase == PHASE_IDEATION and agent == "ideation":
+                results[agent] = _run_ideation_step(
+                    session=session,
+                    cumulative_context=cumulative_context,
+                    db_path=db_path,
+                )
+                continue
+
             results[agent] = run_agent(
                 agent_name=agent,
                 session_id=session_id,
@@ -218,6 +235,56 @@ def _run_agents(
         except Exception as exc:  # noqa: BLE001
             errors[agent] = f"{type(exc).__name__}: {exc}"
     return results, errors
+
+
+def _run_ideation_step(
+    *,
+    session,
+    cumulative_context: str,
+    db_path: Path | None,
+) -> str:
+    """Dispatch the ideation phase to ``squad.ideation.run_ideation``.
+
+    When the service is unavailable (LOT 3 not landed yet) or raises, the
+    pipeline still proceeds: a trivial synthetic angle is returned so
+    downstream phases have a seed. This is the "non-critical" contract
+    of the ideation phase.
+    """
+    if _run_ideation is None:
+        logger.warning("squad.ideation not available — using trivial ideation fallback")
+        return _trivial_ideation_output(session)
+    try:
+        report = _run_ideation(
+            session_id=session.id,
+            extra_context=cumulative_context,
+            db_path=db_path,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "run_ideation failed for session %s: %s — using trivial fallback",
+            session.id,
+            exc,
+        )
+        return _trivial_ideation_output(session)
+    return getattr(report, "content", None) or _trivial_ideation_output(session)
+
+
+def _trivial_ideation_output(session) -> str:
+    """Single-angle fallback used when the ideation service can't run.
+
+    Mirrors the minimal shape expected by downstream parsing: one angle
+    seeded from ``session.idea`` so the pipeline never stalls on a
+    non-critical phase.
+    """
+    idea = getattr(session, "idea", "") or ""
+    return (
+        "# Ideation — fallback\n\n"
+        "## Angle 1 — baseline\n"
+        f"- Segment: TBD\n"
+        f"- Value prop: {idea[:200]}\n"
+        "- Approche: direct implementation of the submitted idea\n"
+        "- Divergence: none (fallback angle)\n"
+    )
 
 
 def _handle_cadrage_pause(

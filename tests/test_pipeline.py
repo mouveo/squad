@@ -12,6 +12,7 @@ from squad.constants import (
     PHASE_CHALLENGE,
     PHASE_CONCEPTION,
     PHASE_ETAT_DES_LIEUX,
+    PHASE_IDEATION,
     PHASES,
 )
 from squad.db import (
@@ -118,7 +119,7 @@ def _configure_mocks(
 
 
 class TestHappyPath:
-    def test_runs_all_six_phases_in_order(self, db_path, session, happy_pm_output):
+    def test_runs_all_seven_phases_in_order(self, db_path, session, happy_pm_output):
         calls: list[tuple[str, str]] = []
 
         def _record_agent(agent_name, session_id, phase, **kwargs):
@@ -138,16 +139,27 @@ class TestHappyPath:
             calls.append(("benchmark", "research"))
             return SimpleNamespace(content="# research / benchmark")
 
+        def _record_ideation(session_id, extra_context=None, db_path=None, **kwargs):
+            calls.append(("ideation", "ideation"))
+            return SimpleNamespace(content="# ideation / ideation")
+
         with (
             patch("squad.pipeline.run_agent", side_effect=_record_agent),
             patch("squad.pipeline.run_agents_tolerant", side_effect=_record_tolerant),
             patch("squad.pipeline.run_research", side_effect=_record_research),
+            patch("squad.pipeline._run_ideation", side_effect=_record_ideation),
         ):
             run_pipeline(session.id, db_path=db_path)
 
         phases_run = [p for p, _ in calls]
         first_indexes = [phases_run.index(p) for p in PHASES]
         assert first_indexes == sorted(first_indexes)
+        # Ideation sits strictly between etat_des_lieux and benchmark.
+        assert (
+            phases_run.index(PHASE_ETAT_DES_LIEUX)
+            < phases_run.index(PHASE_IDEATION)
+            < phases_run.index("benchmark")
+        )
 
     def test_status_is_review_after_pipeline(self, db_path, session, happy_pm_output):
         with (
@@ -178,6 +190,31 @@ class TestHappyPath:
         assert set(PHASES).issubset(phases_with_output)
         # First pass → attempt 1 everywhere
         assert {po.attempt for po in outputs} == {1}
+
+    def test_ideation_failure_does_not_block_pipeline(
+        self, db_path, session, happy_pm_output
+    ):
+        """Non-critical: run_ideation raising must not fail the session."""
+
+        def _boom(session_id, extra_context=None, db_path=None, **kwargs):
+            raise RuntimeError("ideation service down")
+
+        with (
+            patch("squad.pipeline.run_agent") as m_agent,
+            patch("squad.pipeline.run_agents_tolerant") as m_tol,
+            patch("squad.pipeline._run_ideation", side_effect=_boom),
+        ):
+            _configure_mocks(m_agent, m_tol, happy_pm_output)
+            run_pipeline(session.id, db_path=db_path)
+
+        updated = get_session(session.id, db_path=db_path)
+        assert updated.status == "review"
+        # Ideation still has a persisted (fallback) output.
+        ideation_outputs = list_phase_outputs(
+            session.id, phase=PHASE_IDEATION, db_path=db_path
+        )
+        assert len(ideation_outputs) == 1
+        assert "fallback" in ideation_outputs[0].output.lower()
 
     def test_parallel_phase_uses_tolerant_executor(self, db_path, session, happy_pm_output):
         with (

@@ -1,4 +1,4 @@
-"""Declarative configuration for the 6 Squad phases.
+"""Declarative configuration for the 7 Squad phases.
 
 Each phase has a fixed identity (see ``squad.constants``) and a set of
 policies used by the pipeline: ordering, default agents, critical agents,
@@ -17,6 +17,7 @@ from squad.constants import (
     PHASE_CHALLENGE,
     PHASE_CONCEPTION,
     PHASE_ETAT_DES_LIEUX,
+    PHASE_IDEATION,
     PHASE_SYNTHESE,
     PHASES,
 )
@@ -90,9 +91,20 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         retry_policy=RetryPolicy(max_attempts=1),
         skip_policy=SkipPolicy(),
     ),
+    PHASE_IDEATION: PhaseConfig(
+        phase=PHASE_IDEATION,
+        order=3,
+        default_agents=("ideation",),
+        critical_agents=(),
+        parallel=False,
+        can_pause=True,
+        max_questions=0,
+        retry_policy=RetryPolicy(max_attempts=1),
+        skip_policy=SkipPolicy(),
+    ),
     PHASE_BENCHMARK: PhaseConfig(
         phase=PHASE_BENCHMARK,
-        order=3,
+        order=4,
         default_agents=("research",),
         critical_agents=(),
         parallel=False,
@@ -103,7 +115,7 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
     ),
     PHASE_CONCEPTION: PhaseConfig(
         phase=PHASE_CONCEPTION,
-        order=4,
+        order=5,
         default_agents=("ai-lead", "architect", "growth", "ux"),
         critical_agents=(),
         parallel=True,
@@ -114,7 +126,7 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
     ),
     PHASE_CHALLENGE: PhaseConfig(
         phase=PHASE_CHALLENGE,
-        order=5,
+        order=6,
         default_agents=("security", "delivery", "architect"),
         critical_agents=(),
         parallel=True,
@@ -125,7 +137,7 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
     ),
     PHASE_SYNTHESE: PhaseConfig(
         phase=PHASE_SYNTHESE,
-        order=6,
+        order=7,
         default_agents=("pm",),
         critical_agents=("pm",),
         parallel=False,
