@@ -596,3 +596,283 @@ class TestFormatPipelineEvent:
         # Must NOT use the question wording — that would be misleading at 0 Qs.
         assert "0 question en attente" not in txt
         assert "questions en attente" not in txt
+
+
+# ── Angle review (LOT 6) ──────────────────────────────────────────────────────
+
+
+def _angle(idx: int, title: str = "t", segment: str = "seg", vp: str = "vp"):
+    from squad.models import IdeationAngle
+
+    return IdeationAngle(
+        session_id="s1",
+        idx=idx,
+        title=title,
+        segment=segment,
+        value_prop=vp,
+        approach="ap",
+        divergence_note="div",
+    )
+
+
+def _slack_session(**overrides):
+    from squad.models import Session
+
+    defaults = dict(
+        id="s1",
+        title="t",
+        project_path="/tmp/p",
+        workspace_path="/tmp/ws",
+        idea="i",
+        slack_channel="C1",
+        slack_thread_ts="1700.1",
+    )
+    return Session(**{**defaults, **overrides})
+
+
+class TestParsePickAngleValue:
+    def test_roundtrip(self):
+        from squad.slack_service import parse_pick_angle_value
+
+        assert parse_pick_angle_value("s1:0") == ("s1", 0)
+        assert parse_pick_angle_value("s-xyz:3") == ("s-xyz", 3)
+
+    def test_rejects_malformed(self):
+        from squad.slack_service import parse_pick_angle_value
+
+        assert parse_pick_angle_value("") == (None, None)
+        assert parse_pick_angle_value("no-colon") == (None, None)
+        assert parse_pick_angle_value(":3") == (None, 3)
+        assert parse_pick_angle_value("s1:abc") == ("s1", None)
+        assert parse_pick_angle_value("s1:-2") == ("s1", None)
+
+
+class TestParsePickAllValue:
+    def test_roundtrip_and_malformed(self):
+        from squad.slack_service import parse_pick_all_value
+
+        assert parse_pick_all_value("s1") == "s1"
+        assert parse_pick_all_value("") is None
+        assert parse_pick_all_value("   ") is None
+
+
+class TestBuildAngleChoiceBlocks:
+    def test_interactive_has_one_button_per_angle_plus_benchmark_all(self):
+        from squad.slack_service import (
+            ANGLE_PICK_ACTION_ID,
+            ANGLE_PICK_ALL_ACTION_ID,
+            build_angle_choice_blocks,
+        )
+
+        angles = [_angle(i, title=f"A{i}") for i in range(3)]
+        blocks = build_angle_choice_blocks(_slack_session(), angles)
+        actions = [b for b in blocks if b["type"] == "actions"]
+        assert len(actions) == 1
+        elements = actions[0]["elements"]
+        # 3 angle buttons + 1 benchmark-all
+        assert len(elements) == 4
+        assert elements[0]["action_id"] == ANGLE_PICK_ACTION_ID
+        assert elements[-1]["action_id"] == ANGLE_PICK_ALL_ACTION_ID
+        # Session id + idx travel through value — NOT a dynamic action_id.
+        assert elements[0]["value"] == "s1:0"
+        assert elements[1]["value"] == "s1:1"
+        assert elements[-1]["value"] == "s1"
+
+    def test_interactive_has_benchmark_all_copy(self):
+        from squad.slack_service import build_angle_choice_blocks
+
+        angles = [_angle(i) for i in range(2)]
+        blocks = build_angle_choice_blocks(_slack_session(), angles)
+        text_blocks = [
+            " ".join(e["text"] for e in (b.get("elements") or []) if "text" in e)
+            for b in blocks
+            if b["type"] == "context"
+        ]
+        joined = " ".join(text_blocks).lower()
+        assert "tous les angles" in joined
+        assert "parallél" in joined or "parallel" in joined
+
+    def test_closed_by_selected_idx_removes_actions(self):
+        from squad.slack_service import build_angle_choice_blocks
+
+        angles = [_angle(i, title=f"A{i}") for i in range(3)]
+        blocks = build_angle_choice_blocks(
+            _slack_session(), angles, selected_idx=2
+        )
+        assert not any(b["type"] == "actions" for b in blocks)
+        recap = " ".join(
+            el["text"]
+            for b in blocks
+            if b["type"] == "context"
+            for el in (b.get("elements") or [])
+            if "text" in el
+        )
+        assert "Angle 2" in recap
+        assert "A2" in recap
+
+    def test_closed_by_benchmark_all_removes_actions_and_mentions_mode(self):
+        from squad.slack_service import build_angle_choice_blocks
+
+        angles = [_angle(i) for i in range(3)]
+        blocks = build_angle_choice_blocks(
+            _slack_session(), angles, benchmark_all=True
+        )
+        assert not any(b["type"] == "actions" for b in blocks)
+        recap = " ".join(
+            el["text"]
+            for b in blocks
+            if b["type"] == "context"
+            for el in (b.get("elements") or [])
+            if "text" in el
+        )
+        assert "tous les angles" in recap.lower()
+
+    def test_header_changes_between_open_and_closed(self):
+        from squad.slack_service import build_angle_choice_blocks
+
+        angles = [_angle(0)]
+        open_blocks = build_angle_choice_blocks(_slack_session(), angles)
+        closed_blocks = build_angle_choice_blocks(
+            _slack_session(), angles, selected_idx=0
+        )
+        assert "Choisir" in open_blocks[0]["text"]["text"]
+        assert "choisi" in closed_blocks[0]["text"]["text"].lower()
+
+
+class TestPostAnglesForReview:
+    def test_posts_card_when_angles_exist(self, db_path, tmp_path):
+        from squad.db import (
+            create_session,
+            get_session,
+            persist_ideation_angle,
+            update_session_slack_thread,
+        )
+        from squad.models import IdeationAngle
+        from squad.slack_service import post_angles_for_review
+
+        project = tmp_path / "p"
+        project.mkdir()
+        s = create_session(
+            title="t",
+            project_path=str(project),
+            workspace_path=str(tmp_path / "ws"),
+            idea="i",
+            db_path=db_path,
+            slack_channel="C1",
+        )
+        update_session_slack_thread(s.id, "1700.0", db_path=db_path)
+        for i in range(3):
+            persist_ideation_angle(
+                db_path,
+                IdeationAngle(
+                    session_id=s.id,
+                    idx=i,
+                    title=f"A{i}",
+                    segment="seg",
+                    value_prop="vp",
+                    approach="ap",
+                    divergence_note="d",
+                ),
+            )
+        refreshed = get_session(s.id, db_path=db_path)
+        client = MagicMock()
+        client.chat_postMessage.return_value = {"ts": "1700.5"}
+
+        ts = post_angles_for_review(client, refreshed, db_path=db_path)
+
+        assert ts == "1700.5"
+        client.chat_postMessage.assert_called_once()
+        kwargs = client.chat_postMessage.call_args.kwargs
+        assert kwargs["channel"] == "C1"
+        assert kwargs["thread_ts"] == "1700.0"
+
+    def test_noop_without_thread(self, db_path):
+        from squad.slack_service import post_angles_for_review
+
+        s = _slack_session(slack_channel=None, slack_thread_ts=None)
+        client = MagicMock()
+        assert post_angles_for_review(client, s, db_path=db_path) is None
+        client.chat_postMessage.assert_not_called()
+
+    def test_noop_without_angles(self, db_path, tmp_path):
+        from squad.db import create_session, update_session_slack_thread
+        from squad.slack_service import post_angles_for_review
+
+        project = tmp_path / "p"
+        project.mkdir()
+        s = create_session(
+            title="t",
+            project_path=str(project),
+            workspace_path=str(tmp_path / "ws"),
+            idea="i",
+            db_path=db_path,
+            slack_channel="C1",
+        )
+        update_session_slack_thread(s.id, "1700.0", db_path=db_path)
+        from squad.db import get_session
+
+        refreshed = get_session(s.id, db_path=db_path)
+        client = MagicMock()
+        assert post_angles_for_review(client, refreshed, db_path=db_path) is None
+        client.chat_postMessage.assert_not_called()
+
+
+class TestUpdateAngleChoiceMessage:
+    def test_calls_chat_update_with_closed_blocks(self, db_path, tmp_path):
+        from squad.db import create_session, persist_ideation_angle
+        from squad.models import IdeationAngle
+        from squad.slack_service import update_angle_choice_message
+
+        project = tmp_path / "p"
+        project.mkdir()
+        s = create_session(
+            title="t",
+            project_path=str(project),
+            workspace_path=str(tmp_path / "ws"),
+            idea="i",
+            db_path=db_path,
+            slack_channel="C1",
+        )
+        for i in range(2):
+            persist_ideation_angle(
+                db_path,
+                IdeationAngle(
+                    session_id=s.id,
+                    idx=i,
+                    title=f"A{i}",
+                    segment="seg",
+                    value_prop="vp",
+                    approach="ap",
+                    divergence_note="d",
+                ),
+            )
+        client = MagicMock()
+        update_angle_choice_message(
+            client,
+            s,
+            selected_idx=1,
+            benchmark_all=False,
+            message_ts="1700.7",
+            channel_id="C1",
+            db_path=db_path,
+        )
+        client.chat_update.assert_called_once()
+        kwargs = client.chat_update.call_args.kwargs
+        assert kwargs["ts"] == "1700.7"
+        assert kwargs["channel"] == "C1"
+        blocks = kwargs["blocks"]
+        assert not any(b["type"] == "actions" for b in blocks)
+
+    def test_noop_without_ts(self, db_path):
+        from squad.slack_service import update_angle_choice_message
+
+        client = MagicMock()
+        update_angle_choice_message(
+            client,
+            _slack_session(),
+            selected_idx=0,
+            benchmark_all=False,
+            message_ts="",
+            db_path=db_path,
+        )
+        client.chat_update.assert_not_called()
