@@ -31,39 +31,38 @@
 
 ## LOT 1 — Migration vers claude-opus-4-7[1m]
 
-Remplace les constantes `_MODEL = "claude-opus-4-6"` et
-`_MODEL_LIGHT = "claude-sonnet-4-6"` dans `squad/executor.py` par
-`claude-opus-4-7[1m]` et `claude-sonnet-4-7` respectivement. Le `[1m]`
-est le flag que la Claude CLI accepte pour activer la fenêtre 1M
-tokens du modèle Opus 4.7.
+Remplace **uniquement** la constante `_MODEL = "claude-opus-4-6"`
+dans `squad/executor.py` par `_MODEL = "claude-opus-4-7[1m]"`. La
+constante `_MODEL_LIGHT = "claude-sonnet-4-6"` reste inchangée — le
+modèle `claude-sonnet-4-7` n'existe pas dans la Claude CLI, la version
+la plus récente de sonnet reste 4-6. Le flag `[1m]` est accepté par la
+Claude CLI pour activer la fenêtre 1M tokens du modèle Opus 4.7 (testé
+manuellement le 2026-04-18 : `claude --model "claude-opus-4-7[1m]"
+--print --max-turns 2 "say ok"` retourne `ok`).
 
 Met à jour `DEFAULT_CONFIG_YAML` dans `squad/config.py` pour que la
 ligne commentée `# model: claude-opus-4-6` devienne `# model:
 claude-opus-4-7[1m]`. Aucune clé obligatoire n'est ajoutée : la config
 reste entièrement backward-compatible et la constante reste le défaut.
 
-Met à jour les références dans les tests (`tests/test_executor.py`,
-`tests/test_subject_detector.py`) : toutes les assertions `in cmd`
-qui cherchent `claude-opus-4-6` ou `claude-sonnet-4-6` doivent être
-mises à jour. `tests/test_subject_detector.py::TestDetectSubject::
-test_uses_light_model_for_classification` vérifie explicitement la
-valeur — le renommer en `test_uses_sonnet_for_classification` et
-pointer sur la nouvelle constante.
+Met à jour les références dans les tests (`tests/test_executor.py`)
+qui assertent `"claude-opus-4-6" in cmd` — elles doivent maintenant
+pointer sur `"claude-opus-4-7[1m]"`. Les tests `test_subject_detector.py`
+qui référencent `MODEL_LIGHT` ne changent pas.
 
 Aucun changement de comportement produit : même API, seul le modèle
-sous-jacent change. Le coût par phase augmente légèrement mais le
-gain en fenêtre (8k → 1M) règle tout problème de contexte trop long
-en aval.
+Opus change. Le coût par phase augmente légèrement mais le gain en
+fenêtre (8k → 1M) règle tout problème de contexte trop long en aval.
 
 **Success criteria**:
 - `squad.executor._MODEL == "claude-opus-4-7[1m]"`
-- `squad.executor._MODEL_LIGHT == "claude-sonnet-4-7"`
-- Tous les tests existants de `test_executor.py` et `test_subject_detector.py` passent après mise à jour
-- `squad serve` démarre sans erreur (la Claude CLI accepte le nouveau nom de modèle)
-- `grep -r "claude-opus-4-6\|claude-sonnet-4-6" squad/ tests/ | grep -v \.md\|\.log` retourne vide
-- `DEFAULT_CONFIG_YAML` mentionne le nouveau modèle dans son commentaire
+- `squad.executor._MODEL_LIGHT == "claude-sonnet-4-6"` (inchangé)
+- Tous les tests existants de `test_executor.py` passent après mise à jour
+- `squad serve` démarre sans erreur avec le nouveau modèle Opus
+- `grep -r '"claude-opus-4-6"' squad/ tests/` retourne vide
+- `DEFAULT_CONFIG_YAML` mentionne `claude-opus-4-7[1m]` dans son commentaire
 
-**Files**: `squad/executor.py`, `squad/config.py`, `tests/test_executor.py`, `tests/test_subject_detector.py`
+**Files**: `squad/executor.py`, `squad/config.py`, `tests/test_executor.py`
 
 ---
 
