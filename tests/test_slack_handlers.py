@@ -333,6 +333,88 @@ class TestFileShared:
             )
         m_download.assert_not_called()
 
+    def test_no_thread_share_but_channel_hint_posts_helpful_message(
+        self, db_path, config, executor, client
+    ):
+        cfg = self._config_with_token(config)
+        _slack_session(db_path, cfg, executor, client)
+        client.files_info.return_value = {
+            "file": {"id": "F123", "name": "brief.md", "size": 10, "shares": {}}
+        }
+        # Drop previous chat_postMessage calls from session creation noise.
+        client.chat_postMessage.reset_mock()
+        handle_file_shared(
+            event={"file_id": "F123", "channel_id": "C999", "user_id": "U123"},
+            client=client,
+            db_path=db_path,
+            config=cfg,
+        )
+        hints = [
+            c
+            for c in client.chat_postMessage.call_args_list
+            if "thread de la session" in (c.kwargs.get("text", "") or "")
+        ]
+        assert hints, "should post a hint when file dropped outside a thread"
+
+    def test_thread_without_matching_session_posts_warning(
+        self, db_path, config, executor, client
+    ):
+        cfg = self._config_with_token(config)
+        # No Squad session created for thread "9999.000000".
+        client.files_info.return_value = _file_info(
+            "F123",
+            name="brief.md",
+            size=10,
+            channel="C999",
+            thread_ts="9999.000000",
+        )
+        client.chat_postMessage.reset_mock()
+        with patch("squad.slack_handlers.download_file") as m_download:
+            handle_file_shared(
+                event={"file_id": "F123"},
+                client=client,
+                db_path=db_path,
+                config=cfg,
+            )
+        m_download.assert_not_called()
+        warnings = [
+            c
+            for c in client.chat_postMessage.call_args_list
+            if "Aucune session Squad" in (c.kwargs.get("text", "") or "")
+        ]
+        assert warnings, "should warn when no session matches the thread"
+
+    def test_happy_path_posts_ack_and_success(
+        self, db_path, config, executor, client, tmp_path
+    ):
+        cfg = self._config_with_token(config)
+        session = _slack_session(db_path, cfg, executor, client)
+        update_session_slack_thread(session.id, "1700000000.000100", db_path=db_path)
+
+        client.files_info.return_value = _file_info(
+            "F123",
+            name="brief.md",
+            size=120,
+            channel="C999",
+            thread_ts="1700000000.000100",
+        )
+        client.chat_postMessage.reset_mock()
+        with patch(
+            "squad.slack_handlers.download_file", return_value=b"# brief\n\nhello"
+        ):
+            handle_file_shared(
+                event={"file_id": "F123"},
+                client=client,
+                db_path=db_path,
+                config=cfg,
+            )
+
+        texts = [c.kwargs.get("text", "") for c in client.chat_postMessage.call_args_list]
+        assert any("Fichier reçu" in t for t in texts), "ACK message missing"
+        assert any(
+            "attaché" in t or "attachment" in t.lower() for t in texts
+        ), "success confirmation missing"
+
 
 # ── Question actions + modal (LOT 4) ──────────────────────────────────────────
 

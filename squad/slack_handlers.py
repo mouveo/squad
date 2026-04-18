@@ -354,16 +354,23 @@ def handle_file_shared(
 ) -> None:
     """Process a Slack ``file_shared`` event.
 
-    Looks up the file via ``files.info``, resolves the originating
-    thread, attaches the file to the matching session if any. Drops
-    targeting unrelated threads are silently ignored. Validation /
-    network failures post a short error message in the session thread
-    so the PO knows the upload was rejected, then return without
-    raising.
+    Every decision branch logs at ``INFO`` so ``~/.squad/serve.log``
+    tells the full story of what happened to a dropped file. When the
+    file was shared in a thread that has no matching Squad session we
+    still post a visible hint back in that thread so the PO does not
+    wonder where the upload went.
     """
     file_id = (event or {}).get("file_id") or ((event or {}).get("file") or {}).get("id")
+    channel_hint = (event or {}).get("channel_id")
+    user_hint = (event or {}).get("user_id")
+    logger.info(
+        "file_shared received — file_id=%s channel=%s user=%s",
+        file_id,
+        channel_hint,
+        user_hint,
+    )
     if not file_id:
-        logger.debug("file_shared event without file id: %r", event)
+        logger.warning("file_shared event missing file id: %r", event)
         return
 
     try:
@@ -377,23 +384,89 @@ def handle_file_shared(
         else getattr(info_response, "get", lambda _k: None)("file")
     )
     if not file_info:
-        return
-
-    channel_id, thread_ts = _resolve_thread_ts_from_shares(file_info)
-    if not channel_id or not thread_ts:
-        logger.debug("file %s has no thread share — ignoring", file_id)
-        return
-
-    session = find_session_by_thread(channel_id, thread_ts, db_path=db_path)
-    if session is None:
-        logger.debug(
-            "file %s shared in %s/%s but no Squad session matches", file_id, channel_id, thread_ts
-        )
+        logger.warning("files.info returned no file payload for %s", file_id)
         return
 
     filename = file_info.get("name") or file_id
     size = int(file_info.get("size") or 0)
     mime_type = file_info.get("mimetype")
+    logger.info(
+        "file_info resolved — file_id=%s name=%s size=%d mime=%s shares=%s",
+        file_id,
+        filename,
+        size,
+        mime_type,
+        file_info.get("shares"),
+    )
+
+    channel_id, thread_ts = _resolve_thread_ts_from_shares(file_info)
+    if not channel_id or not thread_ts:
+        logger.warning(
+            "file %s has no thread share — ignored (shares=%s)",
+            file_id,
+            file_info.get("shares"),
+        )
+        # User-facing hint in the originating channel so the PO knows why
+        # nothing happened. Best-effort; failures are logged but ignored.
+        try:
+            if channel_hint:
+                client.chat_postMessage(
+                    channel=channel_hint,
+                    text=(
+                        ":information_source: Pour joindre un fichier à une session Squad, "
+                        "glissez-le dans le *thread de la session* (cliquez sur le message "
+                        "« Session créée » puis `Reply`), pas dans le channel principal."
+                    ),
+                )
+        except Exception:
+            logger.exception("Could not post no-thread hint to channel %s", channel_hint)
+        return
+
+    logger.info(
+        "file %s thread resolved — channel=%s thread_ts=%s",
+        file_id,
+        channel_id,
+        thread_ts,
+    )
+
+    session = find_session_by_thread(channel_id, thread_ts, db_path=db_path)
+    if session is None:
+        logger.warning(
+            "file %s shared in %s/%s but no Squad session matches",
+            file_id,
+            channel_id,
+            thread_ts,
+        )
+        try:
+            client.chat_postMessage(
+                channel=channel_id,
+                thread_ts=thread_ts,
+                text=(
+                    ":warning: Aucune session Squad active ne correspond à ce thread — "
+                    "le fichier ne sera pas injecté dans le contexte des agents. "
+                    "Lancez d'abord `/squad new <idée>` puis déposez le fichier dans *ce* thread."
+                ),
+            )
+        except Exception:
+            logger.exception("Could not post no-match hint")
+        return
+
+    logger.info(
+        "file %s matched session %s — starting validation + download",
+        file_id,
+        session.id,
+    )
+
+    # Immediate ACK so the PO sees the event landed, even if download takes a few seconds.
+    try:
+        post_thread_message(
+            client,
+            session,
+            f":mag: Fichier reçu `{filename}` ({size} octets) — validation et téléchargement…",
+        )
+    except Exception:
+        logger.exception("Could not post ACK for file %s", file_id)
+
     download_url = file_info.get("url_private_download") or file_info.get("url_private")
     bot_token = (config.get("slack") or {}).get("bot_token")
 
@@ -404,10 +477,17 @@ def handle_file_shared(
             filename, size, session_id=session.id, config=config, db_path=db_path
         )
     except AttachmentError as exc:
+        logger.warning("Attachment rejected for session %s: %s", session.id, exc)
         post_thread_message(client, session, f":warning: Pièce jointe rejetée : {exc}")
         return
 
     if not download_url or not bot_token:
+        logger.error(
+            "Cannot download file %s — url_present=%s token_present=%s",
+            file_id,
+            bool(download_url),
+            bool(bot_token),
+        )
         post_thread_message(
             client, session, ":warning: Téléchargement Slack indisponible (URL ou token manquant)."
         )
@@ -425,6 +505,7 @@ def handle_file_shared(
             db_path=db_path,
         )
     except AttachmentError as exc:
+        logger.warning("Attachment rejected on store for session %s: %s", session.id, exc)
         post_thread_message(client, session, f":warning: Pièce jointe rejetée : {exc}")
         return
     except Exception as exc:
@@ -432,10 +513,17 @@ def handle_file_shared(
         post_thread_message(client, session, f":warning: Erreur interne pendant l'attachement : {exc}")
         return
 
+    logger.info(
+        "Attachment stored for session %s — path=%s size=%d",
+        session.id,
+        meta.path,
+        meta.size_bytes,
+    )
     post_thread_message(
         client,
         session,
-        f":paperclip: Fichier `{meta.filename}` attaché ({meta.size_bytes} octets).",
+        f":paperclip: Fichier `{meta.filename}` attaché ({meta.size_bytes} octets). "
+        f"Il sera injecté dans le contexte des prochaines phases.",
     )
 
 
