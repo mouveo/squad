@@ -37,6 +37,42 @@ Un document markdown avec :
   - `rationale` : 2-3 phrases expliquant la stratégie.
   - `divergence_score` : `low`, `medium` ou `high` selon l'écart réel entre les angles.
 
+## Exemple d'output
+
+Format strictement attendu — markdown simple, ASCII uniquement, pas de tableau ni de HTML.
+Titre de section : `## Angle <n> — <titre>` (deux dièses, espace, mot `Angle`, indice 0-based, tiret cadratin `—`).
+Chaque champ est une puce `-` avec un libellé suivi de `:`.
+Le document se termine par un seul bloc ```json``` contenant exactement les quatre clés listées ci-dessus.
+
+```
+# Ideation
+
+Lecture du problème : réduire le temps d'activation des nouveaux clients SaaS
+en s'appuyant sur les signaux déjà posés par le cadrage et l'état des lieux.
+
+## Angle 0 — Ops-driven automation
+- Segment: responsables ops SMB (20–200 employés)
+- Value prop: économiser 2h/semaine sur les étapes manuelles d'onboarding
+- Approche: pipeline d'automatisation léger branché sur le CRM existant
+- Note de divergence: segment (ops vs fondateurs)
+
+## Angle 1 — Enterprise compliance
+- Segment: IT enterprise régulée (santé, finance)
+- Value prop: onboarding audit-ready dès le jour 1
+- Approche: SSO + ingestion des logs d'audit dans un entrepôt dédié
+- Note de divergence: approche (governance-first)
+
+## Angle 2 — Self-serve founders
+- Segment: fondateurs early-stage sans équipe ops
+- Value prop: passer de l'inscription au premier workflow en 10 minutes
+- Approche: CLI single-binary, zéro backend à opérer
+- Note de divergence: value prop (vitesse vs exhaustivité)
+
+```json
+{"strategy": "auto_pick", "best_angle_idx": 0, "rationale": "L'angle ops a le signal le plus net dans le cadrage et l'état des lieux.", "divergence_score": "high"}
+```
+```
+
 ## Erreurs à éviter
 - Produire 5 variantes cosmétiques d'un même angle au lieu de 3 angles réellement divergents.
 - Présenter un angle sans segment clair ni note de divergence, ce qui le rend inexploitable downstream.

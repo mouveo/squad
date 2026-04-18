@@ -292,6 +292,19 @@ def _fallback_angle(session_id: str, idea: str) -> IdeationAngle:
     )
 
 
+_RETRY_FORMAT_INSTRUCTION = (
+    "Ton premier essai n'a produit aucun angle parseable. "
+    "Reformate STRICTEMENT ta réponse selon la section « Exemple d'output » "
+    "de ton prompt d'agent : chaque angle commence par un header "
+    "`## Angle <n> — Titre` (deux dièses, indice 0-based, tiret cadratin), "
+    "suivi des puces `- Segment:`, `- Value prop:`, `- Approche:`, "
+    "`- Note de divergence:`. Termine par UN seul bloc ```json``` contenant "
+    "exactement les quatre clés `strategy`, `best_angle_idx`, `rationale`, "
+    "`divergence_score`. Markdown simple, ASCII uniquement, pas de tableau, "
+    "pas de HTML, pas de texte avant ou après le bloc JSON."
+)
+
+
 def _fallback_content(idea: str) -> str:
     """Minimal markdown body returned when the agent produced nothing usable."""
     return (
@@ -338,7 +351,7 @@ def run_ideation(
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "Ideation agent failed for session %s: %s — using fallback",
+            "Ideation agent failed for session %s: %s — attempting retry",
             session_id,
             exc,
         )
@@ -346,9 +359,38 @@ def run_ideation(
 
     angles = parse_angles(content, session_id)
     if not angles:
+        # Exactly one retry: ask the agent to reformat per the canonical
+        # example in its markdown definition. The phase instruction is
+        # the only lever — the parser is already tolerant on headings,
+        # bullets and FR/EN label variants.
         logger.info(
-            "Ideation produced no parseable angles for session %s — using fallback",
+            "Ideation produced no parseable angles for session %s — retrying once with format instruction",
             session_id,
+        )
+        try:
+            content = run_agent(
+                agent_name="ideation",
+                session_id=session_id,
+                phase="ideation",
+                cumulative_context=extra_context,
+                phase_instruction=_RETRY_FORMAT_INSTRUCTION,
+                cwd=cwd,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Ideation retry failed for session %s: %s",
+                session_id,
+                exc,
+            )
+            content = ""
+        angles = parse_angles(content, session_id)
+
+    if not angles:
+        logger.warning(
+            "Ideation retry produced no parseable angles for session %s "
+            "(content=%d chars) — using fallback",
+            session_id,
+            len(content or ""),
         )
         fallback = _fallback_angle(session_id, session.idea)
         persist_ideation_angle(db_path, fallback)
