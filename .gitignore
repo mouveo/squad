@@ -18,3 +18,4 @@ venv/
 .forge/
 .claude/hooks/
 .claude/session-state/
+.DS_Store
