@@ -23,6 +23,7 @@ from squad.db import (
     increment_challenge_retry_count,
     increment_phase_attempt,
     list_active_sessions,
+    list_ideation_angles,
     list_pending_questions,
     list_phase_outputs,
     list_plans,
@@ -30,13 +31,17 @@ from squad.db import (
     mark_phase_skipped,
     get_plan,
     get_question,
+    persist_ideation_angle,
+    set_benchmark_all_angles,
+    set_selected_angle,
+    update_input_richness,
     update_plan_slack_message_ts,
     update_question_slack_message_ts,
     update_session_failure_reason,
     update_session_profile,
     update_session_status,
 )
-from squad.models import RESEARCH_DEPTH_DEEP, RESEARCH_DEPTH_LIGHT
+from squad.models import RESEARCH_DEPTH_DEEP, RESEARCH_DEPTH_LIGHT, IdeationAngle
 
 
 @pytest.fixture
@@ -64,7 +69,13 @@ class TestEnsureSchema:
         from sqlite_utils import Database
 
         db = Database(db_path)
-        assert set(db.table_names()) >= {"sessions", "phase_outputs", "questions", "plans"}
+        assert set(db.table_names()) >= {
+            "sessions",
+            "phase_outputs",
+            "questions",
+            "plans",
+            "ideation_angles",
+        }
 
     def test_idempotent(self, db_path: Path):
         ensure_schema(db_path)
@@ -519,3 +530,133 @@ class TestPlanSlackMessageTs:
         ensure_schema(db_path)  # must not reset
         fetched = get_plan(plan.id, db_path=db_path)
         assert fetched.slack_message_ts == "1700000000.000200"
+
+
+# ── ideation (Plan 6 — LOT 1) ─────────────────────────────────────────────────
+
+
+def _angle(session_id: str, idx: int, **overrides) -> IdeationAngle:
+    defaults = dict(
+        session_id=session_id,
+        idx=idx,
+        title=f"Angle {idx}",
+        segment="SMB",
+        value_prop="Save time",
+        approach="Automation",
+        divergence_note="unique",
+    )
+    return IdeationAngle(**{**defaults, **overrides})
+
+
+class TestSessionIdeationState:
+    def test_defaults_after_create(self, db_path: Path):
+        s = _session(db_path)
+        fetched = get_session(s.id, db_path=db_path)
+        assert fetched.input_richness is None
+        assert fetched.selected_angle_idx is None
+        assert fetched.benchmark_all_angles is False
+
+    def test_update_input_richness(self, db_path: Path):
+        s = _session(db_path)
+        update_input_richness(db_path, s.id, "rich")
+        assert get_session(s.id, db_path=db_path).input_richness == "rich"
+
+    def test_set_selected_angle(self, db_path: Path):
+        s = _session(db_path)
+        set_selected_angle(db_path, s.id, 2)
+        assert get_session(s.id, db_path=db_path).selected_angle_idx == 2
+
+    def test_set_selected_angle_supports_zero(self, db_path: Path):
+        s = _session(db_path)
+        set_selected_angle(db_path, s.id, 0)
+        assert get_session(s.id, db_path=db_path).selected_angle_idx == 0
+
+    def test_set_benchmark_all_angles_roundtrip(self, db_path: Path):
+        s = _session(db_path)
+        set_benchmark_all_angles(db_path, s.id, True)
+        assert get_session(s.id, db_path=db_path).benchmark_all_angles is True
+        set_benchmark_all_angles(db_path, s.id, False)
+        assert get_session(s.id, db_path=db_path).benchmark_all_angles is False
+
+
+class TestIdeationAnglesTable:
+    def test_insert_and_list_roundtrip(self, db_path: Path):
+        s = _session(db_path)
+        a0 = persist_ideation_angle(db_path, _angle(s.id, 0, title="A"))
+        a1 = persist_ideation_angle(db_path, _angle(s.id, 1, title="B"))
+        angles = list_ideation_angles(db_path, s.id)
+        assert [a.idx for a in angles] == [0, 1]
+        assert angles[0].title == "A"
+        assert angles[1].title == "B"
+        assert a0.session_id == s.id and a1.session_id == s.id
+
+    def test_upsert_replaces_existing(self, db_path: Path):
+        s = _session(db_path)
+        persist_ideation_angle(db_path, _angle(s.id, 0, title="Old"))
+        persist_ideation_angle(db_path, _angle(s.id, 0, title="New"))
+        angles = list_ideation_angles(db_path, s.id)
+        assert len(angles) == 1
+        assert angles[0].title == "New"
+
+    def test_isolated_by_session(self, db_path: Path):
+        s1 = _session(db_path)
+        s2 = _session(db_path)
+        persist_ideation_angle(db_path, _angle(s1.id, 0))
+        assert list_ideation_angles(db_path, s2.id) == []
+
+    def test_angles_survive_schema_reapply(self, db_path: Path):
+        s = _session(db_path)
+        persist_ideation_angle(db_path, _angle(s.id, 0, title="keep"))
+        ensure_schema(db_path)
+        angles = list_ideation_angles(db_path, s.id)
+        assert len(angles) == 1
+        assert angles[0].title == "keep"
+
+
+class TestSchemaMigrationFromLegacyDb:
+    def test_preexisting_db_gets_ideation_schema(self, tmp_path: Path):
+        """A DB created with an older schema must upgrade cleanly."""
+        from sqlite_utils import Database
+
+        path = tmp_path / "legacy.db"
+        legacy = Database(path)
+        # Minimal legacy `sessions` table — no ideation columns.
+        legacy["sessions"].create(
+            {
+                "id": str,
+                "title": str,
+                "project_path": str,
+                "workspace_path": str,
+                "idea": str,
+                "status": str,
+                "mode": str,
+                "created_at": str,
+                "updated_at": str,
+            },
+            pk="id",
+            not_null={"title", "project_path", "workspace_path", "idea", "status"},
+        )
+        legacy["sessions"].insert(
+            {
+                "id": "legacy-1",
+                "title": "Legacy",
+                "project_path": "/tmp/proj",
+                "workspace_path": "/tmp/proj/.squad/sessions/legacy-1",
+                "idea": "old idea",
+                "status": "draft",
+                "mode": "approval",
+                "created_at": "2026-01-01T00:00:00",
+                "updated_at": "2026-01-01T00:00:00",
+            }
+        )
+
+        ensure_schema(path)
+
+        cols = set(Database(path)["sessions"].columns_dict)
+        assert {"input_richness", "selected_angle_idx", "benchmark_all_angles"}.issubset(cols)
+        assert "ideation_angles" in Database(path).table_names()
+
+        fetched = get_session("legacy-1", db_path=path)
+        assert fetched.input_richness is None
+        assert fetched.selected_angle_idx is None
+        assert fetched.benchmark_all_angles is False
