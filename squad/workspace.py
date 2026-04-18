@@ -1,21 +1,68 @@
 """Session workspace — filesystem operations for Squad session artifacts."""
 
 import json
+import logging
 import re
+import subprocess
 from pathlib import Path
 
 from squad.constants import PHASE_DIRS
 from squad.db import get_session, list_pending_questions
 from squad.models import Session
 
-_MINIMAL_CONTEXT_TEMPLATE = """\
-# Project context
+logger = logging.getLogger(__name__)
 
-Project: {name}
-Path: {path}
+# Dirs/files that add noise without context. Excluded from the tree scan.
+_TREE_EXCLUDES: set[str] = {
+    ".git",
+    ".hg",
+    ".svn",
+    "node_modules",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "venv",
+    "env",
+    "dist",
+    "build",
+    ".next",
+    ".nuxt",
+    ".turbo",
+    ".forge",
+    ".claude",
+    ".DS_Store",
+    "target",
+    "vendor",
+    "coverage",
+    ".cache",
+}
 
-No CLAUDE.md found in this project. Agents should infer context from the idea provided.
-"""
+# Manifests scanned for stack detection, in priority order.
+_MANIFEST_FILES: tuple[str, ...] = (
+    "package.json",
+    "pyproject.toml",
+    "requirements.txt",
+    "Pipfile",
+    "composer.json",
+    "Cargo.toml",
+    "go.mod",
+    "Gemfile",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "Dockerfile",
+    "docker-compose.yml",
+    "docker-compose.yaml",
+)
+
+# Soft truncation budgets per scanned artefact (in characters).
+_BUDGET_CLAUDE_MD: int = 4000
+_BUDGET_README: int = 2500
+_BUDGET_MANIFEST: int = 1200
+_BUDGET_TREE_ENTRIES: int = 80
+_BUDGET_GIT_LOG_LINES: int = 20
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -75,13 +122,142 @@ def write_context(session_id: str, content: str, db_path: Path | None = None) ->
     return context_file
 
 
+def _truncate(text: str, budget: int, marker: str = "\n\n[… truncated]") -> str:
+    """Cut ``text`` to at most ``budget`` chars, appending a marker if clipped."""
+    if len(text) <= budget:
+        return text
+    return text[:budget].rstrip() + marker
+
+
+def _read_text_if_present(path: Path, budget: int) -> str | None:
+    """Read ``path`` as UTF-8 text, truncated. Return None if missing or unreadable."""
+    if not path.is_file():
+        return None
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError as exc:
+        logger.warning("Could not read %s: %s", path, exc)
+        return None
+    if not content:
+        return None
+    return _truncate(content, budget)
+
+
+def _project_tree(root: Path, max_entries: int = _BUDGET_TREE_ENTRIES) -> str:
+    """Produce a shallow (2-level) tree listing, skipping noisy dirs."""
+    lines: list[str] = []
+    try:
+        top = sorted(
+            p for p in root.iterdir() if p.name not in _TREE_EXCLUDES and not p.name.startswith(".")
+        )
+    except OSError as exc:
+        logger.warning("Could not list %s: %s", root, exc)
+        return ""
+
+    for entry in top:
+        if len(lines) >= max_entries:
+            lines.append("…")
+            break
+        suffix = "/" if entry.is_dir() else ""
+        lines.append(f"{entry.name}{suffix}")
+        if entry.is_dir():
+            try:
+                children = sorted(
+                    c
+                    for c in entry.iterdir()
+                    if c.name not in _TREE_EXCLUDES and not c.name.startswith(".")
+                )[:8]
+            except OSError:
+                continue
+            for child in children:
+                if len(lines) >= max_entries:
+                    break
+                child_suffix = "/" if child.is_dir() else ""
+                lines.append(f"  {child.name}{child_suffix}")
+    return "\n".join(lines)
+
+
+def _recent_git_log(project_path: Path, max_lines: int = _BUDGET_GIT_LOG_LINES) -> str:
+    """Return the last ``max_lines`` git commits, or empty string if not a repo."""
+    if not (project_path / ".git").exists():
+        return ""
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(project_path),
+                "log",
+                f"-{max_lines}",
+                "--oneline",
+                "--no-decorate",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("git log failed for %s: %s", project_path, exc)
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
 def get_context(project_path: str) -> str:
-    """Return the project context: CLAUDE.md content if present, else a minimal stub."""
-    claude_md = Path(project_path) / "CLAUDE.md"
-    if claude_md.exists():
-        return claude_md.read_text(encoding="utf-8")
-    name = Path(project_path).name
-    return _MINIMAL_CONTEXT_TEMPLATE.format(name=name, path=project_path)
+    """Return a rich project context scan.
+
+    Scans the target project directory and assembles a markdown block
+    fed to every agent via ``squad.context_builder``. Coverage:
+
+    * ``CLAUDE.md`` — authoritative project doc (if present).
+    * ``README.md`` — human-facing overview (top ~2500 chars).
+    * Manifests — ``package.json``, ``pyproject.toml``, ``composer.json``…
+      for stack detection.
+    * Directory tree — 2-level listing of top-level folders (noise dirs
+      like ``node_modules``, ``.venv``, ``.git`` are filtered out).
+    * Recent git log — last 20 commits (``--oneline``) when the project
+      is a git repo.
+
+    All artefacts are truncated under soft budgets so the cumulative
+    context stays well under the 15k-token ceiling documented in
+    ``CLAUDE.md``. Missing files are simply omitted.
+    """
+    root = Path(project_path)
+    name = root.name
+    parts: list[str] = [f"Project: {name}", f"Path: {project_path}"]
+
+    claude_md = _read_text_if_present(root / "CLAUDE.md", _BUDGET_CLAUDE_MD)
+    if claude_md:
+        parts.append(f"### CLAUDE.md\n\n{claude_md}")
+
+    readme = _read_text_if_present(root / "README.md", _BUDGET_README)
+    if readme:
+        parts.append(f"### README.md\n\n{readme}")
+
+    manifests: list[str] = []
+    for name_ in _MANIFEST_FILES:
+        content = _read_text_if_present(root / name_, _BUDGET_MANIFEST)
+        if content:
+            manifests.append(f"**{name_}**\n```\n{content}\n```")
+    if manifests:
+        parts.append("### Manifests\n\n" + "\n\n".join(manifests))
+
+    tree = _project_tree(root)
+    if tree:
+        parts.append(f"### Top-level tree\n\n```\n{tree}\n```")
+
+    git_log = _recent_git_log(root)
+    if git_log:
+        parts.append(f"### Recent commits (last {_BUDGET_GIT_LOG_LINES})\n\n```\n{git_log}\n```")
+
+    if len(parts) == 2:  # only Project/Path headers → nothing found
+        parts.append(
+            "No CLAUDE.md, README, manifests or git history found. "
+            "Agents should ask clarifying questions before inferring stack or architecture."
+        )
+    return "\n\n".join(parts)
 
 
 # ── phase outputs ──────────────────────────────────────────────────────────────

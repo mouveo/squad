@@ -117,7 +117,7 @@ class TestSquadNew:
         )
         assert list_active_sessions(db_path=db_path) == []
         respond.assert_called_once()
-        assert "mappé" in respond.call_args.args[0]
+        assert "Aucun projet trouvé" in respond.call_args.args[0]
         client.chat_postMessage.assert_not_called()
         assert executor.submitted == []
 

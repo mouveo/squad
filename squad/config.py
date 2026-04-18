@@ -61,6 +61,12 @@ mode: approval
 # Default Claude model used by the executor.
 # model: claude-opus-4-6
 
+# Root directory scanned for idea → project auto-discovery. When an
+# idea mentions a folder name present under this root (e.g. "Ajouter un
+# CRM à sitavista"), Squad resolves the project path automatically.
+# Overridden by explicit `slack.channels.<id>.project_path` mappings.
+dev_root: ~/Developer
+
 # Slack notifications (squad.notifier).
 slack:
   # webhook: ${SQUAD_SLACK_WEBHOOK}

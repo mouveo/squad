@@ -61,30 +61,82 @@ def _derive_title(idea: str, max_len: int = _TITLE_MAX_LEN) -> str:
     return idea[:max_len].rstrip() + "…"
 
 
-def resolve_project_path(channel_id: str, config: dict) -> str:
-    """Return the project path mapped to ``channel_id``.
+def _dev_root(config: dict) -> Path:
+    """Return the dev root directory used for idea → project auto-discovery.
 
-    Raises :class:`SlackResolutionError` when no mapping exists or the
-    configured directory is missing on disk.
+    Defaults to ``~/Developer``. Overridable via the top-level ``dev_root``
+    config key (expands ``~`` and ``${VAR}`` at load time upstream).
+    """
+    raw = config.get("dev_root") if isinstance(config, dict) else None
+    return Path(raw).expanduser() if raw else Path.home() / "Developer"
+
+
+def discover_project_path(idea: str, config: dict) -> str | None:
+    """Find a project directory under the dev root by scanning the idea.
+
+    Tokenises the idea, and for each token that matches the name of a
+    directory in ``dev_root``, returns that directory's absolute path.
+    Longest matching project name wins (so "sitavista-admin" beats
+    "sitavista" when both folders exist). Returns ``None`` when nothing
+    matches or the dev root is not a directory.
+    """
+    root = _dev_root(config)
+    if not root.is_dir():
+        return None
+    try:
+        candidates = [p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")]
+    except OSError:
+        return None
+
+    # Lower-case, strip punctuation to tokens of >=3 chars.
+    tokens = {t for t in re.findall(r"[a-z0-9][a-z0-9\-_]{2,}", idea.lower()) if len(t) >= 3}
+    if not tokens:
+        return None
+
+    matches = [p for p in candidates if p.name.lower() in tokens]
+    if not matches:
+        return None
+    # Longest name wins, then alpha for determinism.
+    matches.sort(key=lambda p: (-len(p.name), p.name))
+    return str(matches[0].resolve())
+
+
+def resolve_project_path(channel_id: str, config: dict, idea: str | None = None) -> str:
+    """Return the project path for a Slack session.
+
+    Resolution order:
+
+    1. Per-channel mapping ``slack.channels.<channel_id>.project_path``
+       (explicit override, highest priority).
+    2. Auto-discovery from the idea via ``discover_project_path`` against
+       ``dev_root`` (defaults to ``~/Developer``).
+
+    Raises :class:`SlackResolutionError` when neither resolves to an
+    existing directory — the message is posted back to Slack.
     """
     channels = (config.get("slack") or {}).get("channels") or {}
-    entry = channels.get(channel_id)
-    if not entry:
-        raise SlackResolutionError(
-            f"Channel `{channel_id}` n'est mappé à aucun projet Squad. "
-            f"Ajoutez `slack.channels.{channel_id}.project_path` dans votre config."
-        )
-    project_path = entry.get("project_path") if isinstance(entry, dict) else None
-    if not project_path:
-        raise SlackResolutionError(
-            f"Channel `{channel_id}` n'a pas de `project_path` configuré."
-        )
-    path = Path(project_path)
-    if not path.is_dir():
-        raise SlackResolutionError(
-            f"Le `project_path` configuré pour `{channel_id}` n'existe pas : {project_path}"
-        )
-    return str(path.resolve())
+    entry = channels.get(channel_id) if isinstance(channels, dict) else None
+    if entry:
+        project_path = entry.get("project_path") if isinstance(entry, dict) else None
+        if project_path:
+            path = Path(project_path)
+            if not path.is_dir():
+                raise SlackResolutionError(
+                    f"Le `project_path` configuré pour `{channel_id}` n'existe pas : "
+                    f"{project_path}"
+                )
+            return str(path.resolve())
+
+    if idea:
+        discovered = discover_project_path(idea, config)
+        if discovered:
+            return discovered
+
+    raise SlackResolutionError(
+        f"Aucun projet trouvé pour `{channel_id}`. "
+        f"Ajoutez `slack.channels.{channel_id}.project_path` dans votre config, "
+        f"ou nommez explicitement un dossier de `{_dev_root(config)}` dans votre idée."
+    )
 
 
 def assert_user_allowed(user_id: str, config: dict) -> None:
@@ -125,7 +177,7 @@ def create_session_from_slack(
 
     cfg = config if config is not None else load_config()
     assert_user_allowed(user_id, cfg)
-    project_path = resolve_project_path(channel_id, cfg)
+    project_path = resolve_project_path(channel_id, cfg, idea=idea)
 
     session_id = str(uuid.uuid4())
     workspace_path = get_project_state_dir(project_path) / "sessions" / session_id

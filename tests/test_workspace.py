@@ -141,15 +141,72 @@ class TestGetContext:
         context = get_context(str(project_path))
         assert "# My project" in context
         assert "some context" in context
+        assert "### CLAUDE.md" in context
 
-    def test_returns_minimal_stub_when_absent(self, project_path: Path):
+    def test_empty_project_signals_absence(self, project_path: Path):
         context = get_context(str(project_path))
-        assert "No CLAUDE.md" in context
+        assert "No CLAUDE.md, README, manifests" in context
         assert project_path.name in context
 
-    def test_stub_includes_project_path(self, project_path: Path):
+    def test_header_includes_project_path(self, project_path: Path):
         context = get_context(str(project_path))
         assert str(project_path) in context
+
+    def test_includes_readme_when_present(self, project_path: Path):
+        (project_path / "README.md").write_text("# Sitavista\n\nProduction SaaS")
+        context = get_context(str(project_path))
+        assert "### README.md" in context
+        assert "Production SaaS" in context
+
+    def test_includes_manifests_for_stack(self, project_path: Path):
+        (project_path / "package.json").write_text(
+            '{"name": "sitavista", "dependencies": {"next": "14.0.0"}}'
+        )
+        (project_path / "composer.json").write_text('{"require": {"php": "^8.2"}}')
+        context = get_context(str(project_path))
+        assert "### Manifests" in context
+        assert "package.json" in context
+        assert '"next"' in context
+        assert "composer.json" in context
+        assert "php" in context
+
+    def test_includes_top_level_tree(self, project_path: Path):
+        (project_path / "app").mkdir()
+        (project_path / "src").mkdir()
+        (project_path / "node_modules").mkdir()  # must be excluded
+        (project_path / ".git").mkdir()  # must be excluded
+        (project_path / "README.md").write_text("x")
+        context = get_context(str(project_path))
+        assert "### Top-level tree" in context
+        assert "app/" in context
+        assert "src/" in context
+        assert "README.md" in context
+        assert "node_modules" not in context
+        assert ".git" not in context
+
+    def test_truncates_large_readme(self, project_path: Path):
+        huge = "x" * 10_000
+        (project_path / "README.md").write_text(huge)
+        context = get_context(str(project_path))
+        assert "[… truncated]" in context
+        assert len(context) < 10_000 + 1_000  # budget + overhead
+
+    def test_includes_git_log_when_repo(self, project_path: Path):
+        import subprocess as sp
+
+        sp.run(["git", "init", "-q"], cwd=project_path, check=False)
+        sp.run(["git", "config", "user.email", "t@t"], cwd=project_path, check=False)
+        sp.run(["git", "config", "user.name", "t"], cwd=project_path, check=False)
+        (project_path / "a.txt").write_text("hi")
+        sp.run(["git", "add", "."], cwd=project_path, check=False)
+        sp.run(
+            ["git", "commit", "-q", "-m", "initial commit msg"],
+            cwd=project_path,
+            check=False,
+        )
+        context = get_context(str(project_path))
+        assert "### Recent commits" in context
+        assert "initial commit msg" in context
 
 
 # ── write_phase_output / read_phase_outputs ────────────────────────────────────

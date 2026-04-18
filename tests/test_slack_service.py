@@ -19,6 +19,7 @@ from squad.slack_service import (
     SlackResolutionError,
     assert_user_allowed,
     create_session_from_slack,
+    discover_project_path,
     format_pipeline_event,
     format_root_message,
     post_pipeline_event,
@@ -61,7 +62,7 @@ class TestResolveProjectPath:
         assert Path(resolve_project_path("C999", config)) == project.resolve()
 
     def test_unmapped_channel_raises(self, config):
-        with pytest.raises(SlackResolutionError, match="n'est mappé"):
+        with pytest.raises(SlackResolutionError, match="Aucun projet trouvé"):
             resolve_project_path("CUNKNOWN", config)
 
     def test_missing_project_path_raises(self, project):
@@ -77,6 +78,79 @@ class TestResolveProjectPath:
     def test_empty_config_raises(self):
         with pytest.raises(SlackResolutionError):
             resolve_project_path("C999", {})
+
+    def test_falls_back_to_idea_discovery(self, tmp_path):
+        # No channel mapping, but the dev_root has a folder whose name
+        # appears in the idea → resolved via discovery.
+        dev = tmp_path / "dev"
+        dev.mkdir()
+        (dev / "sitavista").mkdir()
+        cfg = {"dev_root": str(dev)}
+        resolved = resolve_project_path("CX", cfg, idea="Ajouter un CRM à sitavista")
+        assert Path(resolved) == (dev / "sitavista").resolve()
+
+    def test_channel_mapping_wins_over_discovery(self, tmp_path, project):
+        # Both channel mapping AND discoverable folder → mapping wins.
+        dev = tmp_path / "dev"
+        dev.mkdir()
+        (dev / "sitavista").mkdir()
+        cfg = {
+            "dev_root": str(dev),
+            "slack": {"channels": {"C1": {"project_path": str(project)}}},
+        }
+        resolved = resolve_project_path("C1", cfg, idea="Tune sitavista CRM")
+        assert Path(resolved) == project.resolve()
+
+
+# ── discover_project_path ──────────────────────────────────────────────────────
+
+
+class TestDiscoverProjectPath:
+    def test_returns_match(self, tmp_path):
+        dev = tmp_path / "dev"
+        dev.mkdir()
+        (dev / "sitavista").mkdir()
+        (dev / "forge").mkdir()
+        cfg = {"dev_root": str(dev)}
+        assert discover_project_path("Revoir sitavista", cfg) == str(
+            (dev / "sitavista").resolve()
+        )
+
+    def test_longest_name_wins(self, tmp_path):
+        dev = tmp_path / "dev"
+        dev.mkdir()
+        (dev / "sitavista").mkdir()
+        (dev / "sitavista-admin").mkdir()
+        cfg = {"dev_root": str(dev)}
+        # Both tokens present in the idea; the longer project name wins.
+        assert discover_project_path("sitavista sitavista-admin", cfg) == str(
+            (dev / "sitavista-admin").resolve()
+        )
+
+    def test_no_match_returns_none(self, tmp_path):
+        dev = tmp_path / "dev"
+        dev.mkdir()
+        (dev / "forge").mkdir()
+        cfg = {"dev_root": str(dev)}
+        assert discover_project_path("build a weather app", cfg) is None
+
+    def test_missing_dev_root_returns_none(self, tmp_path):
+        cfg = {"dev_root": str(tmp_path / "does-not-exist")}
+        assert discover_project_path("sitavista", cfg) is None
+
+    def test_hidden_dirs_ignored(self, tmp_path):
+        dev = tmp_path / "dev"
+        dev.mkdir()
+        (dev / ".cache").mkdir()
+        cfg = {"dev_root": str(dev)}
+        assert discover_project_path(".cache tweak", cfg) is None
+
+    def test_short_tokens_ignored(self, tmp_path):
+        dev = tmp_path / "dev"
+        dev.mkdir()
+        (dev / "ab").mkdir()  # too short (< 3 chars)
+        cfg = {"dev_root": str(dev)}
+        assert discover_project_path("ab update", cfg) is None
 
 
 # ── assert_user_allowed ────────────────────────────────────────────────────────
