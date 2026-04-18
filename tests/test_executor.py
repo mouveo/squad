@@ -245,9 +245,11 @@ class TestRunAgent:
         mock_cli.return_value = _completed(stdout=_ndjson("ux output"))
         run_agent("ux", "sess-1", "conception")
         cmd_used = mock_cli.call_args[0][0]
-        assert "--allowedTools" in cmd_used
-        tools_idx = cmd_used.index("--allowedTools") + 1
-        tools = cmd_used[tools_idx]
+        tools_flag = next(
+            (a for a in cmd_used if a.startswith("--allowedTools=")), None
+        )
+        assert tools_flag is not None
+        tools = tools_flag.split("=", 1)[1]
         assert "WebSearch" in tools
         assert "WebFetch" in tools
         assert "Read" in tools
@@ -366,8 +368,9 @@ class TestRunTaskText:
         mock_cli.return_value = _completed(stdout=_ndjson("ok"))
         run_task_text("prompt", allowed_tools=["WebSearch"])
         cmd = mock_cli.call_args[0][0]
-        assert "--allowedTools" in cmd
-        assert "WebSearch" in cmd[cmd.index("--allowedTools") + 1]
+        tools_flag = next((a for a in cmd if a.startswith("--allowedTools=")), None)
+        assert tools_flag is not None
+        assert "WebSearch" in tools_flag.split("=", 1)[1]
 
     @patch("squad.executor._call_claude_cli")
     def test_no_allowed_tools_flag_when_none(self, mock_cli):
@@ -453,9 +456,8 @@ class TestRunAgentForwardsPromptParams:
         captured: dict = {}
 
         def _fake_cli(cmd, timeout):
-            # Capture the rendered prompt from the subprocess command args
-            prompt_idx = cmd.index("--prompt") + 1
-            captured["prompt"] = cmd[prompt_idx]
+            # The Claude CLI takes the prompt as the last positional arg.
+            captured["prompt"] = cmd[-1]
             return _completed(_ndjson("ok output"), returncode=0)
 
         with patch("squad.executor._call_claude_cli", side_effect=_fake_cli):
@@ -475,8 +477,7 @@ class TestRunAgentForwardsPromptParams:
         captured: list[str] = []
 
         def _fake_cli(cmd, timeout):
-            prompt_idx = cmd.index("--prompt") + 1
-            captured.append(cmd[prompt_idx])
+            captured.append(cmd[-1])
             return _completed(_ndjson("agent ok"), returncode=0)
 
         with patch("squad.executor._call_claude_cli", side_effect=_fake_cli):
@@ -511,7 +512,8 @@ class TestRunAgentsTolerant:
     def test_partial_failure_returns_both(self):
         def _fake(cmd, timeout):
             # Detect the agent from the dedicated "# Agent: <name>" header
-            prompt = cmd[cmd.index("--prompt") + 1]
+            # (the prompt is the last positional arg of the Claude CLI).
+            prompt = cmd[-1]
             if prompt.startswith("# Agent: ux"):
                 return _completed("", returncode=1, stderr="ux crash")
             return _completed(_ndjson("ok"), returncode=0)
@@ -528,7 +530,7 @@ class TestRunAgentsTolerant:
         captured: list[str] = []
 
         def _fake(cmd, timeout):
-            captured.append(cmd[cmd.index("--prompt") + 1])
+            captured.append(cmd[-1])
             return _completed(_ndjson("ok"), returncode=0)
 
         with patch("squad.executor._call_claude_cli", side_effect=_fake):
