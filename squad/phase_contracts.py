@@ -24,7 +24,10 @@ import json
 import re
 from dataclasses import dataclass
 
-_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+# Fenced JSON block. The language tag is optional and case-insensitive so
+# ```` ```json ```` , ```` ```JSON ```` and a neutral ```` ``` ```` fence
+# all round-trip through the same extractor.
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE)
 
 # Allowed severity labels for challenge blockers
 BLOCKER_SEVERITIES: tuple[str, ...] = ("blocking", "major", "minor", "info")
@@ -78,10 +81,23 @@ class SynthesisContract:
 def extract_json_block(text: str) -> dict:
     """Return the first JSON object found in the given text.
 
-    Scans for fenced ```json { ... } ``` blocks first, then falls back to
-    the first balanced {...} object found anywhere in the text. Only dict
-    payloads are accepted — top-level arrays raise ``ContractError``.
+    Extraction is tolerant on shape: a fenced ```` ```json ``` / ```` ```JSON ```
+    / neutral ```` ``` ```` block, a response that IS a bare JSON object,
+    or a JSON object embedded anywhere in free-form prose are all accepted.
+    Only dict payloads are accepted — top-level arrays raise
+    ``ContractError``.
     """
+    # Raw JSON object response (no fence, no prose around the payload).
+    stripped = text.strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            pass
+        else:
+            if isinstance(parsed, dict):
+                return parsed
+
     for match in _JSON_FENCE_RE.finditer(text):
         try:
             parsed = json.loads(match.group(1))

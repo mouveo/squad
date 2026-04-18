@@ -99,6 +99,26 @@ def _stub_plan_generation():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _stub_run_research():
+    """Stub ``squad.pipeline.run_research`` so the benchmark phase never
+    invokes the real Claude CLI. Individual tests that want to exercise
+    research wiring can still override this by patching inside a ``with``
+    block — the inner patch wins.
+
+    ``run_research`` is imported into the ``squad.pipeline`` namespace,
+    so patching it there covers every pipeline code path that dispatches
+    the benchmark phase.
+    """
+    from types import SimpleNamespace
+
+    def _fake(session_id, extra_context=None, db_path=None, **kwargs):
+        return SimpleNamespace(content=f"# research / benchmark for {session_id}")
+
+    with patch("squad.pipeline.run_research", side_effect=_fake):
+        yield
+
+
 def _configure_mocks(
     run_agent_mock, run_tolerant_mock, pm_output: str, challenge_output: str = ""
 ) -> None:
@@ -662,6 +682,149 @@ class TestEventCallback:
         persisted = get_session(session.id, db_path=db_path)
         assert persisted.status == "failed"
         assert "Plan generation failed" in (persisted.failure_reason or "")
+
+
+# ── Synthese contract retry (LOT 4 — Plan 7) ──────────────────────────────────
+
+
+class TestSyntheseContractRetry:
+    def test_invalid_contract_triggers_synthese_retry_and_recovers(
+        self, db_path, session, happy_pm_output
+    ):
+        """First plan gen raises invalid-contract → synthese rerun → second gen succeeds."""
+        from squad.plan_generator import InvalidSynthesisContractError
+
+        call_count = {"gen": 0}
+
+        def _gen(session_id, db_path=None):
+            call_count["gen"] += 1
+            if call_count["gen"] == 1:
+                raise InvalidSynthesisContractError(
+                    "bad contract",
+                    last_output_path="/abs/synthese-1.md",
+                )
+            return None
+
+        with (
+            patch("squad.pipeline.run_agent") as m_agent,
+            patch("squad.pipeline.run_agents_tolerant") as m_tol,
+            patch("squad.pipeline._generate_and_copy_plans", side_effect=_gen),
+        ):
+            _configure_mocks(m_agent, m_tol, happy_pm_output)
+            run_pipeline(session.id, db_path=db_path)
+
+        # Plan generation was attempted exactly twice — retry happened.
+        assert call_count["gen"] == 2
+        # Session landed in review (retry succeeded).
+        updated = get_session(session.id, db_path=db_path)
+        assert updated.status == "review"
+        # A second synthese attempt was persisted.
+        synthese_outputs = list_phase_outputs(
+            session.id, phase="synthese", db_path=db_path
+        )
+        assert {po.attempt for po in synthese_outputs} == {1, 2}
+
+    def test_retry_passes_phase_instruction_to_synthese_rerun(
+        self, db_path, session, happy_pm_output
+    ):
+        """The synthese rerun must receive an explicit reformat instruction."""
+        from squad.plan_generator import InvalidSynthesisContractError
+
+        call_count = {"gen": 0}
+        captured_instructions: list = []
+
+        def _gen(session_id, db_path=None):
+            call_count["gen"] += 1
+            if call_count["gen"] == 1:
+                raise InvalidSynthesisContractError("bad", last_output_path="/x.md")
+            return None
+
+        def _agent(agent_name, session_id, phase, **kwargs):
+            if phase == "synthese":
+                captured_instructions.append(kwargs.get("phase_instruction"))
+            return happy_pm_output if agent_name == "pm" else f"# {agent_name} / {phase}"
+
+        with (
+            patch("squad.pipeline.run_agent", side_effect=_agent),
+            patch("squad.pipeline.run_agents_tolerant") as m_tol,
+            patch("squad.pipeline._generate_and_copy_plans", side_effect=_gen),
+        ):
+
+            def _tolerant(agents_list, session_id, phase, **kwargs):
+                return {a: f"# {a} / {phase}" for a in agents_list}, {}
+
+            m_tol.side_effect = _tolerant
+            run_pipeline(session.id, db_path=db_path)
+
+        # Two synthese calls: first from the main loop (no instruction),
+        # second from the retry (with the reformat instruction).
+        assert len(captured_instructions) == 2
+        assert captured_instructions[0] in (None, "")
+        assert captured_instructions[1] is not None
+        assert "contrat JSON" in captured_instructions[1]
+
+    def test_double_contract_failure_fails_session_with_path(
+        self, db_path, session, happy_pm_output
+    ):
+        """If the retry still produces an invalid contract, fail with the raw path."""
+        from squad.models import EVENT_FAILED
+        from squad.plan_generator import InvalidSynthesisContractError
+
+        call_count = {"gen": 0}
+        events = []
+
+        def _gen(session_id, db_path=None):
+            call_count["gen"] += 1
+            raise InvalidSynthesisContractError(
+                "still bad",
+                last_output_path=f"/abs/synthese-{call_count['gen']}.md",
+            )
+
+        with (
+            patch("squad.pipeline.run_agent") as m_agent,
+            patch("squad.pipeline.run_agents_tolerant") as m_tol,
+            patch("squad.pipeline._generate_and_copy_plans", side_effect=_gen),
+        ):
+            _configure_mocks(m_agent, m_tol, happy_pm_output)
+            with pytest.raises(PipelineError) as excinfo:
+                run_pipeline(
+                    session.id, db_path=db_path, event_callback=events.append
+                )
+
+        # Retry happened exactly once (2 total calls), not more.
+        assert call_count["gen"] == 2
+        # The failure message carries the most recent synthese file path.
+        reason = str(excinfo.value)
+        assert "/abs/synthese-2.md" in reason
+        # Persisted failure_reason and event reflect the same path.
+        persisted = get_session(session.id, db_path=db_path)
+        assert persisted.status == "failed"
+        assert "/abs/synthese-2.md" in (persisted.failure_reason or "")
+        failed = [e for e in events if e.type == EVENT_FAILED]
+        assert len(failed) == 1
+        assert "/abs/synthese-2.md" in (failed[0].failure_reason or "")
+
+    def test_non_contract_error_does_not_trigger_synthese_retry(
+        self, db_path, session, happy_pm_output
+    ):
+        """A plain ValueError (e.g. no synthese output) must NOT trigger a retry."""
+        call_count = {"gen": 0}
+
+        def _gen(session_id, db_path=None):
+            call_count["gen"] += 1
+            raise ValueError("No synthese output found")
+
+        with (
+            patch("squad.pipeline.run_agent") as m_agent,
+            patch("squad.pipeline.run_agents_tolerant") as m_tol,
+            patch("squad.pipeline._generate_and_copy_plans", side_effect=_gen),
+        ):
+            _configure_mocks(m_agent, m_tol, happy_pm_output)
+            with pytest.raises(PipelineError):
+                run_pipeline(session.id, db_path=db_path)
+
+        # Only the initial attempt — no retry for generic errors.
+        assert call_count["gen"] == 1
 
 
 # ── cwd routing by agent (LOT 3 — Plan 5) ─────────────────────────────────────

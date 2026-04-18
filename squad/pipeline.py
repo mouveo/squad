@@ -86,6 +86,7 @@ from squad.phase_contracts import (
     parse_questions_contract,
 )
 from squad.plan_generator import (
+    InvalidSynthesisContractError,
     copy_plans_to_project,
     generate_plans_from_session,
 )
@@ -120,6 +121,20 @@ _PROFILE_DEPENDENT_PHASES: set[str] = {
     PHASE_CHALLENGE,
     PHASE_SYNTHESE,
 }
+
+# Phase instruction sent when the synthese phase must be rerun because
+# its first attempt produced an unparseable synthesis contract. The
+# message is explicit about the only acceptable shape so the agent
+# re-emits the structured block the plan generator needs.
+_SYNTHESE_CONTRACT_RETRY_INSTRUCTION = (
+    "Ta première synthèse n'a pas produit de contrat JSON exploitable. "
+    "Reformate STRICTEMENT ta réponse : le document markdown reste le "
+    "même (résumés, décisions, plans), mais il doit se terminer par UN "
+    "seul bloc ```json``` contenant exactement les trois clés "
+    "`decision_summary` (string), `open_questions` (array of strings) "
+    "et `plan_inputs` (array of strings). Pas de texte après le bloc "
+    "JSON. Sans ce bloc, la génération des plans Forge échoue."
+)
 
 
 def _ensure_subject_profile(session, db_path: Path | None):
@@ -842,10 +857,71 @@ def run_pipeline(
 
     # After the six phases complete, generate Forge plans from the
     # synthesis contract, validate them and copy them to the target
-    # project. Failures here surface as PipelineError so the session
-    # ends up in 'failed' rather than 'review'.
+    # project. A malformed synthesis contract is recoverable: we rerun
+    # the synthese phase exactly once with a strict reformat instruction
+    # before giving up. Any other failure is terminal.
     try:
         _generate_and_copy_plans(session_id, db_path=db_path)
+    except InvalidSynthesisContractError as exc:
+        logger.warning(
+            "Synthesis contract invalid for session %s (%s) — retrying synthese once",
+            session_id,
+            exc,
+        )
+        try:
+            run_phase(
+                session_id,
+                PHASE_SYNTHESE,
+                db_path=db_path,
+                phase_instruction=_SYNTHESE_CONTRACT_RETRY_INSTRUCTION,
+            )
+            _generate_and_copy_plans(session_id, db_path=db_path)
+        except InvalidSynthesisContractError as exc2:
+            path = exc2.last_output_path or exc.last_output_path or "(unknown)"
+            reason = (
+                f"Plan generation failed after synthese retry: {exc2} "
+                f"(last synthese file: {path})"
+            )
+            logger.error(
+                "Plan generation failed after synthese retry for session %s: %s",
+                session_id,
+                exc2,
+            )
+            update_session_failure_reason(session_id, reason, db_path=db_path)
+            update_session_status(
+                session_id=session_id,
+                status=STATUS_FAILED,
+                db_path=db_path,
+            )
+            _emit_event(
+                event_callback,
+                session_id=session_id,
+                started_at=started_at,
+                type=EVENT_FAILED,
+                failure_reason=reason,
+            )
+            raise PipelineError(reason) from exc2
+        except (AgentError, PipelineError, ValueError, RuntimeError, ForgeFormatError) as exc2:
+            reason = f"Plan generation failed after synthese retry: {exc2}"
+            logger.error(
+                "Plan generation failed after synthese retry for session %s: %s",
+                session_id,
+                exc2,
+            )
+            update_session_failure_reason(session_id, reason, db_path=db_path)
+            update_session_status(
+                session_id=session_id,
+                status=STATUS_FAILED,
+                db_path=db_path,
+            )
+            _emit_event(
+                event_callback,
+                session_id=session_id,
+                started_at=started_at,
+                type=EVENT_FAILED,
+                failure_reason=reason,
+            )
+            raise PipelineError(reason) from exc2
     except (ValueError, RuntimeError, ForgeFormatError) as exc:
         reason = f"Plan generation failed: {exc}"
         logger.error("Plan generation failed for session %s: %s", session_id, exc)

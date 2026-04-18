@@ -17,6 +17,7 @@ from squad.db import (
 from squad.forge_format import ForgeFormatError
 from squad.plan_generator import (
     TEMPLATE_PATH,
+    InvalidSynthesisContractError,
     build_plan_prompt,
     copy_plans_to_project,
     generate_plans,
@@ -287,21 +288,53 @@ class TestGeneratePlansFromSession:
         assert "rate limiting required" in prompt
 
     def test_raises_when_no_synthese_output(self, session, db_path):
-        with pytest.raises(ValueError, match="No synthese"):
+        # "No synthese output yet" must be distinguishable from "contract
+        # invalid": plain ValueError, not ``InvalidSynthesisContractError``.
+        with pytest.raises(ValueError, match="No synthese") as excinfo:
             generate_plans_from_session(session.id, db_path=db_path)
+        assert not isinstance(excinfo.value, InvalidSynthesisContractError)
 
-    def test_raises_when_contract_malformed(self, session, db_path):
+    def test_raises_invalid_contract_error_when_malformed(self, session, db_path):
         create_phase_output(
             session.id,
             PHASE_SYNTHESE,
             "pm",
             "no contract here",
-            "/f.md",
+            "/abs/path/synthese-pm.md",
             attempt=1,
             db_path=db_path,
         )
-        with pytest.raises(ValueError, match="synthesis contract"):
+        with pytest.raises(InvalidSynthesisContractError) as excinfo:
             generate_plans_from_session(session.id, db_path=db_path)
+        # The operator-facing path points at the raw synthese file so it
+        # can be opened directly without digging through the DB.
+        assert excinfo.value.last_output_path == "/abs/path/synthese-pm.md"
+        assert "synthesis contract" in str(excinfo.value)
+
+    def test_invalid_contract_error_uses_latest_attempt_path(self, session, db_path):
+        # Two attempts persisted: the error must carry the second (most
+        # recent) attempt's file path, not the first.
+        create_phase_output(
+            session.id,
+            PHASE_SYNTHESE,
+            "pm",
+            "first attempt, no contract",
+            "/abs/synthese-pm-1.md",
+            attempt=1,
+            db_path=db_path,
+        )
+        create_phase_output(
+            session.id,
+            PHASE_SYNTHESE,
+            "pm",
+            "second attempt, still no contract",
+            "/abs/synthese-pm-2.md",
+            attempt=2,
+            db_path=db_path,
+        )
+        with pytest.raises(InvalidSynthesisContractError) as excinfo:
+            generate_plans_from_session(session.id, db_path=db_path)
+        assert excinfo.value.last_output_path == "/abs/synthese-pm-2.md"
 
 
 # ── copy_plans_to_project ──────────────────────────────────────────────────────

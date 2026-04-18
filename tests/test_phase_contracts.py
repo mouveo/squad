@@ -47,6 +47,28 @@ class TestExtractJsonBlock:
         text = '```json\n{"outer": {"inner": 42}}\n```'
         assert extract_json_block(text) == {"outer": {"inner": 42}}
 
+    def test_parses_uppercase_json_fence(self):
+        """Language tag is case-insensitive — ```JSON``` must also work."""
+        text = '```JSON\n{"a": 1}\n```'
+        assert extract_json_block(text) == {"a": 1}
+
+    def test_parses_mixed_case_json_fence(self):
+        text = '```Json\n{"a": 2}\n```'
+        assert extract_json_block(text) == {"a": 2}
+
+    def test_parses_raw_json_object_response(self):
+        """Some agents return a bare JSON object with no markdown at all."""
+        text = '{"decision_summary": "ship", "open_questions": [], "plan_inputs": []}'
+        assert extract_json_block(text) == {
+            "decision_summary": "ship",
+            "open_questions": [],
+            "plan_inputs": [],
+        }
+
+    def test_parses_raw_json_with_surrounding_whitespace(self):
+        text = '   \n  {"k": "v"}  \n\n  '
+        assert extract_json_block(text) == {"k": "v"}
+
 
 # ── parse_questions_contract ───────────────────────────────────────────────────
 
@@ -156,3 +178,23 @@ class TestParseSynthesisContract:
         )
         with pytest.raises(ContractError):
             parse_synthesis_contract(text)
+
+    def test_accepts_uppercase_fence(self):
+        text = (
+            '```JSON\n{"decision_summary": "s", "open_questions": [], "plan_inputs": []}\n```'
+        )
+        result = parse_synthesis_contract(text)
+        assert result.decision_summary == "s"
+
+    def test_accepts_neutral_fence(self):
+        text = (
+            '```\n{"decision_summary": "s", "open_questions": [], "plan_inputs": []}\n```'
+        )
+        result = parse_synthesis_contract(text)
+        assert result.decision_summary == "s"
+
+    def test_accepts_raw_json_object_response(self):
+        text = '{"decision_summary": "raw", "open_questions": [], "plan_inputs": ["P1"]}'
+        result = parse_synthesis_contract(text)
+        assert result.decision_summary == "raw"
+        assert result.plan_inputs == ("P1",)
