@@ -47,9 +47,11 @@ from squad.db import (
     increment_phase_attempt,
     list_pending_questions,
     list_plans,
+    update_input_richness,
     update_session_failure_reason,
     update_session_status,
 )
+from squad.input_richness import score_input_richness
 from squad.constants import PHASE_BENCHMARK
 from squad.executor import AgentError, run_agent, run_agents_tolerant
 from squad.forge_format import ForgeFormatError
@@ -359,6 +361,22 @@ def run_phase(
     session = get_session(session_id, db_path=db_path)
     if session is None:
         raise PipelineError(f"Session not found: {session_id!r}")
+
+    # Recompute input richness on every entry into ideation so that
+    # attachments dropped after session creation but before this phase
+    # are taken into account. The persisted value gates the strategy
+    # decision in LOT 5 and the benchmark prompt in later lots.
+    if phase == PHASE_IDEATION:
+        try:
+            label = score_input_richness(session_id, db_path=db_path)
+            update_input_richness(db_path, session_id, label)
+            session = get_session(session_id, db_path=db_path) or session
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Input-richness scoring failed for session %s: %s — phase continues",
+                session_id,
+                exc,
+            )
 
     context = build_cumulative_context(session_id, phase, db_path=db_path)
     results, errors = _run_agents(
