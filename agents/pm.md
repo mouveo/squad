@@ -50,3 +50,6 @@ Un document de synthèse en phase 6 comprenant :
 - read_files: oui
 - write_files: oui
 - execute_commands: non
+- glob: non
+- list_files: non
+- grep_files: non

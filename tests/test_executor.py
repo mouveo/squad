@@ -75,8 +75,35 @@ class TestParseAgentCapabilities:
     def test_all_five_capabilities_present(self):
         content = load_agent_definition("pm")
         caps = parse_agent_capabilities(content)
-        expected_keys = {"web_search", "web_fetch", "read_files", "write_files", "execute_commands"}
+        expected_keys = {
+            "web_search",
+            "web_fetch",
+            "read_files",
+            "write_files",
+            "execute_commands",
+            "glob",
+            "list_files",
+            "grep_files",
+        }
         assert set(caps.keys()) == expected_keys
+
+    def test_ux_has_glob_enabled(self):
+        caps = parse_agent_capabilities(load_agent_definition("ux"))
+        assert caps["glob"] is True
+        assert caps["list_files"] is True
+        assert caps["grep_files"] is True
+
+    def test_architect_has_exploration_enabled(self):
+        caps = parse_agent_capabilities(load_agent_definition("architect"))
+        assert caps["grep_files"] is True
+        assert caps["glob"] is True
+        assert caps["list_files"] is True
+
+    def test_pm_has_exploration_disabled(self):
+        caps = parse_agent_capabilities(load_agent_definition("pm"))
+        assert caps["glob"] is False
+        assert caps["list_files"] is False
+        assert caps["grep_files"] is False
 
 
 # ── map_allowed_tools ──────────────────────────────────────────────────────────
@@ -109,11 +136,11 @@ class TestMapAllowedTools:
         tools = map_allowed_tools(caps)
         assert tools == ["Read"]
 
-    def test_ux_gets_read_and_web(self):
+    def test_ux_gets_read_web_and_exploration(self):
         content = load_agent_definition("ux")
         caps = parse_agent_capabilities(content)
         tools = map_allowed_tools(caps)
-        assert set(tools) == {"Read", "WebSearch", "WebFetch"}
+        assert set(tools) == {"Read", "WebSearch", "WebFetch", "Glob", "LS", "Grep"}
 
     def test_no_enabled_caps_returns_empty(self):
         tools = map_allowed_tools({"web_search": False, "read_files": False})

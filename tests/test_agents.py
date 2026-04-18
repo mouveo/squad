@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from squad.constants import AGENT_CAPABILITIES
+
 AGENTS_DIR = Path(__file__).parent.parent / "agents"
 
 AGENT_FILES = [
@@ -30,13 +32,7 @@ REQUIRED_SECTIONS = [
     "## Outils autorisés",
 ]
 
-CAPABILITIES = [
-    "web_search",
-    "web_fetch",
-    "read_files",
-    "write_files",
-    "execute_commands",
-]
+CAPABILITIES = list(AGENT_CAPABILITIES)
 
 # Patterns that would indicate a placeholder was left unreplaced
 PLACEHOLDER_PATTERN = re.compile(r"\{[^}]+\}")

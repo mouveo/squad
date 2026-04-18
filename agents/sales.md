@@ -43,3 +43,6 @@ Analyser la valeur commerciale perçue de la feature et son impact sur le cycle 
 - read_files: oui
 - write_files: oui
 - execute_commands: non
+- glob: non
+- list_files: non
+- grep_files: non
