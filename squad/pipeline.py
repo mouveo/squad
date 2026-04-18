@@ -90,6 +90,35 @@ EventCallback = Callable[[PipelineEvent], None]
 
 logger = logging.getLogger(__name__)
 
+# Agents that run in the target project's filesystem (active exploration).
+# Their Claude subprocess cwd is routed to ``session.project_path`` so
+# Glob/LS/Grep/Read resolve against the real project rather than the
+# Squad workspace.
+_AGENTS_WITH_PROJECT_CWD: set[str] = {"ux", "architect"}
+
+
+def _resolve_agent_cwd(session, agent_name: str) -> str | None:
+    """Return ``session.project_path`` when the agent needs active exploration.
+
+    Returns ``None`` when the agent is not in ``_AGENTS_WITH_PROJECT_CWD``,
+    when ``session.project_path`` is unset, or when the path does not
+    exist on disk (logged as a warning so operators can notice the drift).
+    """
+    if agent_name not in _AGENTS_WITH_PROJECT_CWD:
+        return None
+    project_path = getattr(session, "project_path", None)
+    if not project_path:
+        return None
+    if not Path(project_path).exists():
+        logger.warning(
+            "Agent %r requested active exploration but project_path %r does not exist; "
+            "falling back to cwd=None",
+            agent_name,
+            project_path,
+        )
+        return None
+    return project_path
+
 
 class PipelineError(RuntimeError):
     """Raised when the pipeline cannot continue (critical agent or system failure)."""
@@ -132,7 +161,7 @@ def _persist_output(
 
 def _run_agents(
     cfg: PhaseConfig,
-    session_id: str,
+    session,
     cumulative_context: str,
     phase_instruction: str | None,
     db_path: Path | None = None,
@@ -140,19 +169,25 @@ def _run_agents(
     """Execute the configured agents for a phase and return (results, errors).
 
     Never raises on a partial failure; orchestration decides based on
-    critical vs. non-critical agents.
+    critical vs. non-critical agents. A per-agent ``cwd`` is routed
+    through ``_resolve_agent_cwd`` so active-exploration agents run
+    inside ``session.project_path``.
     """
     agents = list(cfg.default_agents)
     if not agents:
         return {}, {}
 
+    session_id = session.id
+
     if cfg.parallel and len(agents) > 1:
+        cwd_by_agent = {agent: _resolve_agent_cwd(session, agent) for agent in agents}
         return run_agents_tolerant(
             agents_list=agents,
             session_id=session_id,
             phase=cfg.phase,
             cumulative_context=cumulative_context,
             phase_instruction=phase_instruction,
+            cwd_by_agent=cwd_by_agent,
         )
 
     results: dict[str, str] = {}
@@ -176,6 +211,7 @@ def _run_agents(
                 phase=cfg.phase,
                 cumulative_context=cumulative_context,
                 phase_instruction=phase_instruction,
+                cwd=_resolve_agent_cwd(session, agent),
             )
         except AgentError as exc:
             errors[agent] = str(exc)
@@ -253,9 +289,13 @@ def run_phase(
         db_path=db_path,
     )
 
+    session = get_session(session_id, db_path=db_path)
+    if session is None:
+        raise PipelineError(f"Session not found: {session_id!r}")
+
     context = build_cumulative_context(session_id, phase, db_path=db_path)
     results, errors = _run_agents(
-        cfg, session_id, context, phase_instruction, db_path=db_path
+        cfg, session, context, phase_instruction, db_path=db_path
     )
 
     # Persist every successful deliverable before any flow-control decision.
