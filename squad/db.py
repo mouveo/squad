@@ -92,6 +92,7 @@ def _to_question(row: dict) -> Question:
         answer=row.get("answer"),
         answered_at=_dt(row.get("answered_at")),
         created_at=_dt(row.get("created_at")) or datetime.utcnow(),
+        slack_message_ts=row.get("slack_message_ts"),
     )
 
 
@@ -199,12 +200,20 @@ def ensure_schema(db_path: Path | None = None) -> None:
             "answer": str,
             "answered_at": str,
             "created_at": str,
+            # Slack thread message id — lets chat_update keep the
+            # in-thread question rendering in sync with its answer state
+            # (Plan 4 — LOT 4).
+            "slack_message_ts": str,
         },
         pk="id",
         not_null={"session_id", "agent", "phase", "question"},
         if_not_exists=True,
     )
     db["questions"].create_index(["session_id"], if_not_exists=True)
+
+    # Additive migration for DBs created before LOT 4
+    if "slack_message_ts" not in db["questions"].columns_dict:
+        db["questions"].add_column("slack_message_ts", str)
 
     db["plans"].create(
         {
@@ -562,6 +571,29 @@ def answer_question(question_id: str, answer: str, db_path: Path | None = None) 
     db["questions"].update(
         question_id,
         {"answer": answer, "answered_at": _now()},
+    )
+
+
+def get_question(question_id: str, db_path: Path | None = None) -> Question | None:
+    """Return a question by ID, or None if not found."""
+    db = _open(db_path)
+    try:
+        row = db["questions"].get(question_id)
+        return _to_question(dict(row))
+    except Exception:
+        return None
+
+
+def update_question_slack_message_ts(
+    question_id: str,
+    slack_message_ts: str,
+    db_path: Path | None = None,
+) -> None:
+    """Persist the Slack message timestamp for a question (used by chat_update)."""
+    db = _open(db_path)
+    db["questions"].update(
+        question_id,
+        {"slack_message_ts": slack_message_ts},
     )
 
 

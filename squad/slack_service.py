@@ -17,13 +17,20 @@ from sqlite_utils import Database
 
 from squad.config import get_global_db_path, get_project_state_dir, load_config
 from squad.constants import MODE_APPROVAL, PHASE_LABELS, SESSION_MODES
-from squad.db import _to_session, create_session, update_session_slack_thread
+from squad.db import (
+    _to_session,
+    create_session,
+    list_pending_questions,
+    update_question_slack_message_ts,
+    update_session_slack_thread,
+)
 from squad.models import (
     EVENT_FAILED,
     EVENT_INTERVIEWING,
     EVENT_REVIEW,
     EVENT_WORKING,
     PipelineEvent,
+    Question,
     Session,
 )
 from squad.workspace import create_workspace, get_context, write_context, write_idea
@@ -280,3 +287,190 @@ def post_pipeline_event(event: PipelineEvent, session: Session, client) -> None:
         logger.exception(
             "Failed to post pipeline event %r for session %s", event.type, session.id
         )
+
+
+# ── Question Q&A (LOT 4) ──────────────────────────────────────────────────────
+
+# Stable identifiers for Block Kit actions and view submissions. The
+# handler switches on these so renaming them would break in-flight
+# Slack interactions — change only together with a persisted migration.
+QUESTION_ANSWER_ACTION_ID = "squad_question_answer"
+QUESTION_MODAL_CALLBACK_ID = "squad_question_submit"
+QUESTION_MODAL_INPUT_BLOCK_ID = "answer_block"
+QUESTION_MODAL_INPUT_ACTION_ID = "answer_input"
+
+
+def build_question_blocks(question: Question, *, answered: bool = False) -> list[dict]:
+    """Return the Block Kit payload rendered for one pending question.
+
+    When ``answered`` is True the ``Répondre`` button is omitted and the
+    block header switches to a "Répondu" marker — used by ``chat_update``
+    after the modal submission to close the loop visually.
+    """
+    header = ":question: *Question Squad*" if not answered else ":white_check_mark: *Répondue*"
+    body = f"*{question.agent} / {question.phase}*\n{question.question}"
+    blocks: list[dict] = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"{header}\n\n{body}"}},
+    ]
+    if not answered:
+        blocks.append(
+            {
+                "type": "actions",
+                "block_id": f"sq_q_{question.id}",
+                "elements": [
+                    {
+                        "type": "button",
+                        "action_id": QUESTION_ANSWER_ACTION_ID,
+                        "text": {"type": "plain_text", "text": "Répondre"},
+                        "value": question.id,
+                        "style": "primary",
+                    }
+                ],
+            }
+        )
+    return blocks
+
+
+def build_question_modal(question: Question) -> dict:
+    """Return the ``views_open`` payload for a single question.
+
+    The ``question_id`` is embedded in ``private_metadata`` so the view
+    submission handler can locate the DB row without trusting any text
+    extracted from the thread.
+    """
+    return {
+        "type": "modal",
+        "callback_id": QUESTION_MODAL_CALLBACK_ID,
+        "private_metadata": question.id,
+        "title": {"type": "plain_text", "text": "Répondre à la question"},
+        "submit": {"type": "plain_text", "text": "Envoyer"},
+        "close": {"type": "plain_text", "text": "Annuler"},
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*{question.agent} / {question.phase}*\n{question.question}",
+                },
+            },
+            {
+                "type": "input",
+                "block_id": QUESTION_MODAL_INPUT_BLOCK_ID,
+                "label": {"type": "plain_text", "text": "Réponse"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": QUESTION_MODAL_INPUT_ACTION_ID,
+                    "multiline": True,
+                },
+            },
+        ],
+    }
+
+
+def extract_modal_answer(view: dict) -> tuple[str | None, str]:
+    """Return ``(question_id, answer)`` from a view submission payload."""
+    question_id = (view or {}).get("private_metadata") or None
+    state_values = ((view or {}).get("state") or {}).get("values") or {}
+    block = state_values.get(QUESTION_MODAL_INPUT_BLOCK_ID) or {}
+    entry = block.get(QUESTION_MODAL_INPUT_ACTION_ID) or {}
+    answer = (entry.get("value") or "").strip()
+    return question_id, answer
+
+
+def post_question_message(
+    client,
+    session: Session,
+    question: Question,
+    db_path: Path | None = None,
+) -> str | None:
+    """Post one pending question in the session thread and persist its ``ts``.
+
+    Returns the Slack message ``ts`` on success (also persisted in DB),
+    or None when the session has no thread or the call fails. Failures
+    are logged and swallowed — the CLI ``squad answer`` / ``squad resume``
+    flow remains a fully functional fallback.
+    """
+    if not session.slack_channel or not session.slack_thread_ts:
+        return None
+    try:
+        response = client.chat_postMessage(
+            channel=session.slack_channel,
+            thread_ts=session.slack_thread_ts,
+            text=f"Question : {question.question}",
+            blocks=build_question_blocks(question),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to post question %s in Slack", question.id)
+        return None
+    ts = (
+        response.get("ts")
+        if isinstance(response, dict)
+        else getattr(response, "get", lambda _k: None)("ts")
+    )
+    if ts:
+        update_question_slack_message_ts(question.id, ts, db_path=db_path)
+    return ts
+
+
+def post_pending_questions(
+    client,
+    session: Session,
+    db_path: Path | None = None,
+) -> list[str]:
+    """Post every pending question for a session; return the Slack ``ts`` list.
+
+    Questions that already carry a ``slack_message_ts`` are skipped so a
+    crash-then-resume cycle does not duplicate the thread messages.
+    """
+    posted: list[str] = []
+    for question in list_pending_questions(session.id, db_path=db_path):
+        if question.slack_message_ts:
+            continue
+        ts = post_question_message(client, session, question, db_path=db_path)
+        if ts:
+            posted.append(ts)
+    return posted
+
+
+def update_question_message(
+    client,
+    session: Session,
+    question: Question,
+    *,
+    answered: bool,
+) -> None:
+    """``chat_update`` the in-thread question message to reflect its new state.
+
+    Silently no-ops when the session is CLI-only, the message has not
+    been posted yet, or the Slack API errors out.
+    """
+    if not session.slack_channel or not question.slack_message_ts:
+        return
+    try:
+        client.chat_update(
+            channel=session.slack_channel,
+            ts=question.slack_message_ts,
+            text=(
+                f"Question répondue : {question.question}"
+                if answered
+                else f"Question : {question.question}"
+            ),
+            blocks=build_question_blocks(question, answered=answered),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to chat_update question %s", question.id)
+
+
+def post_question_ack(
+    client,
+    session: Session,
+    question: Question,
+    answer: str,
+) -> None:
+    """Post a short "answer received" reply in the thread after a submission."""
+    preview = (answer[:160] + "…") if len(answer) > 160 else answer
+    post_thread_message(
+        client,
+        session,
+        f":white_check_mark: Réponse enregistrée pour _{question.agent} / {question.phase}_ :\n> {preview}",
+    )

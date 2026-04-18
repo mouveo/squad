@@ -283,6 +283,78 @@ def test_post_pipeline_event_swallows_slack_errors(tmp_path):
     post_pipeline_event(_event(EVENT_WORKING, phase="cadrage"), session, client)
 
 
+class TestQuestionBlocks:
+    def test_build_question_blocks_includes_button_when_pending(self):
+        from squad.models import Question
+        from squad.slack_service import build_question_blocks
+
+        q = Question(
+            id="q-abc",
+            session_id="s1",
+            agent="pm",
+            phase="cadrage",
+            question="Quel segment ?",
+        )
+        blocks = build_question_blocks(q)
+        # Button present with the question id as value
+        actions = [b for b in blocks if b["type"] == "actions"]
+        assert actions
+        button = actions[0]["elements"][0]
+        assert button["action_id"] == "squad_question_answer"
+        assert button["value"] == "q-abc"
+
+    def test_answered_blocks_omit_button(self):
+        from squad.models import Question
+        from squad.slack_service import build_question_blocks
+
+        q = Question(
+            id="q-abc",
+            session_id="s1",
+            agent="pm",
+            phase="cadrage",
+            question="Quel segment ?",
+            answer="SMBs",
+        )
+        blocks = build_question_blocks(q, answered=True)
+        assert not any(b["type"] == "actions" for b in blocks)
+
+    def test_build_modal_embeds_question_id(self):
+        from squad.models import Question
+        from squad.slack_service import build_question_modal
+
+        q = Question(
+            id="q-xyz",
+            session_id="s1",
+            agent="pm",
+            phase="cadrage",
+            question="Quel segment ?",
+        )
+        view = build_question_modal(q)
+        assert view["callback_id"] == "squad_question_submit"
+        assert view["private_metadata"] == "q-xyz"
+
+    def test_extract_modal_answer(self):
+        from squad.slack_service import (
+            QUESTION_MODAL_INPUT_ACTION_ID,
+            QUESTION_MODAL_INPUT_BLOCK_ID,
+            extract_modal_answer,
+        )
+
+        view = {
+            "private_metadata": "q-xyz",
+            "state": {
+                "values": {
+                    QUESTION_MODAL_INPUT_BLOCK_ID: {
+                        QUESTION_MODAL_INPUT_ACTION_ID: {"value": "  SMBs  "}
+                    }
+                }
+            },
+        }
+        qid, answer = extract_modal_answer(view)
+        assert qid == "q-xyz"
+        assert answer == "SMBs"
+
+
 class TestFormatPipelineEvent:
     def test_working_includes_phase_and_timestamp(self):
         txt = format_pipeline_event(_event(EVENT_WORKING, phase="cadrage"))

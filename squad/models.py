@@ -128,6 +128,8 @@ class Question:
     answer: str | None = None
     answered_at: datetime | None = None
     created_at: datetime = field(default_factory=datetime.utcnow)
+    # Slack thread message id used by the handler's chat_update (LOT 4)
+    slack_message_ts: str | None = None
 
 
 @dataclass

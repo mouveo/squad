@@ -14,28 +14,87 @@ from concurrent.futures import Executor
 from pathlib import Path
 
 from squad.attachment_service import AttachmentError, download_file, store_attachment
-from squad.pipeline import PipelineError, run_pipeline
+from squad.db import (
+    answer_question,
+    get_question,
+    get_session,
+    list_pending_questions,
+)
+from squad.models import EVENT_INTERVIEWING, PipelineEvent
+from squad.pipeline import PipelineError, resume_pipeline, run_pipeline
 from squad.slack_service import (
+    QUESTION_ANSWER_ACTION_ID,
+    QUESTION_MODAL_CALLBACK_ID,
     SlackResolutionError,
+    build_question_modal,
     create_session_from_slack,
+    extract_modal_answer,
     find_session_by_thread,
     format_root_message,
+    post_pending_questions,
+    post_pipeline_event,
+    post_question_ack,
     post_thread_message,
     record_thread_ts,
+    update_question_message,
 )
+from squad.workspace import sync_pending_questions
 
 logger = logging.getLogger(__name__)
 
 
-def _run_pipeline_bg(session_id: str, db_path: Path) -> None:
+def _make_event_callback(client, db_path: Path):
+    """Return a pipeline event callback that mirrors transitions into Slack.
+
+    Always posts the threaded pipeline-event summary (LOT 2 contract),
+    and — on entry to ``interviewing`` — also posts each pending
+    question as a separate message with its answer button (LOT 4).
+    Observer errors are caught by the pipeline itself.
+    """
+
+    def _callback(event: PipelineEvent) -> None:
+        session = get_session(event.session_id, db_path=db_path)
+        if session is None:
+            return
+        post_pipeline_event(event, session, client)
+        if event.type == EVENT_INTERVIEWING:
+            post_pending_questions(client, session, db_path=db_path)
+
+    return _callback
+
+
+def _run_pipeline_bg(
+    session_id: str,
+    db_path: Path,
+    event_callback=None,
+) -> None:
     """Run the pipeline and swallow expected errors (background executor)."""
     try:
-        run_pipeline(session_id, db_path=db_path)
+        run_pipeline(session_id, db_path=db_path, event_callback=event_callback)
     except PipelineError as exc:
         logger.warning("Pipeline failed for session %s: %s", session_id, exc)
     except Exception:
         # A crash here must not take down the executor worker; log and move on.
         logger.exception("Unexpected pipeline crash for session %s", session_id)
+
+
+def _resume_pipeline_bg(
+    session_id: str,
+    db_path: Path,
+    event_callback=None,
+) -> None:
+    """Resume the pipeline on the background executor (error-tolerant)."""
+    try:
+        resume_pipeline(session_id, db_path=db_path, event_callback=event_callback)
+    except PipelineError as exc:
+        logger.warning("Pipeline resume failed for session %s: %s", session_id, exc)
+    except RuntimeError as exc:
+        # e.g. "still has unanswered questions" — shouldn't happen on the
+        # Slack flow because we only schedule resume after the last answer,
+        # but logging is enough.
+        logger.warning("Pipeline resume refused for session %s: %s", session_id, exc)
+    except Exception:
+        logger.exception("Unexpected resume crash for session %s", session_id)
 
 
 def register_handlers(
@@ -72,6 +131,22 @@ def register_handlers(
             client=client,
             db_path=db_path,
             config=config,
+        )
+
+    @app.action(QUESTION_ANSWER_ACTION_ID)
+    def _handle_question_action(ack, body, client):
+        ack()
+        handle_question_action(body=body, client=client, db_path=db_path)
+
+    @app.view(QUESTION_MODAL_CALLBACK_ID)
+    def _handle_question_submission(ack, body, view, client):
+        ack()
+        handle_question_submission(
+            body=body,
+            view=view,
+            client=client,
+            db_path=db_path,
+            executor=executor,
         )
 
 
@@ -163,7 +238,8 @@ def _handle_new(
     except Exception:
         logger.exception("Failed to post root thread message for session %s", session.id)
 
-    executor.submit(_run_pipeline_bg, session.id, db_path)
+    event_callback = _make_event_callback(client, db_path)
+    executor.submit(_run_pipeline_bg, session.id, db_path, event_callback)
 
     respond(
         f"Session `{session.id[:8]}` créée — _{session.title}_. "
@@ -285,3 +361,122 @@ def handle_file_shared(
         session,
         f":paperclip: Fichier `{meta.filename}` attaché ({meta.size_bytes} octets).",
     )
+
+
+# ── Question actions + modal submissions (LOT 4) ──────────────────────────────
+
+
+def _extract_question_id_from_action(body: dict) -> str | None:
+    """Pull the ``question_id`` out of a block-actions payload.
+
+    The id was injected as the action element's ``value`` when the
+    question was posted (see ``build_question_blocks``). Returns ``None``
+    when the payload is malformed — the caller ignores those silently.
+    """
+    actions = (body or {}).get("actions") or []
+    if not actions:
+        return None
+    first = actions[0]
+    value = first.get("value")
+    return str(value) if value else None
+
+
+def handle_question_action(
+    *,
+    body: dict,
+    client,
+    db_path: Path,
+) -> None:
+    """Open the answer modal for a ``Répondre`` button click.
+
+    Ignored silently (logs only) when the click targets a question that
+    has no active session or is already answered, per the LOT 4
+    idempotence contract.
+    """
+    question_id = _extract_question_id_from_action(body)
+    if not question_id:
+        logger.debug("Question action without question_id: %r", body)
+        return
+
+    question = get_question(question_id, db_path=db_path)
+    if question is None:
+        logger.debug("Question action on unknown question %s — ignored", question_id)
+        return
+    if question.answer is not None:
+        logger.debug("Question %s already answered — ignoring re-open", question_id)
+        return
+
+    session = get_session(question.session_id, db_path=db_path)
+    if session is None:
+        logger.debug("Session for question %s vanished — ignoring", question_id)
+        return
+
+    trigger_id = (body or {}).get("trigger_id")
+    if not trigger_id:
+        logger.warning("Question action missing trigger_id — cannot open modal")
+        return
+
+    try:
+        client.views_open(trigger_id=trigger_id, view=build_question_modal(question))
+    except Exception:
+        logger.exception("views_open failed for question %s", question_id)
+
+
+def handle_question_submission(
+    *,
+    body: dict,
+    view: dict,
+    client,
+    db_path: Path,
+    executor,
+) -> None:
+    """Persist the modal answer and, when it is the last one, resume the pipeline.
+
+    Strict reuse of the CLI primitives — ``answer_question``,
+    ``sync_pending_questions`` and ``resume_pipeline`` — so the Slack
+    path and the CLI stay behaviour-equivalent. The final resume is
+    scheduled on the shared executor so the Socket Mode thread never
+    blocks on a pipeline run.
+    """
+    question_id, answer = extract_modal_answer(view)
+    if not question_id or not answer:
+        logger.debug("Empty modal submission for question %s", question_id)
+        return
+
+    question = get_question(question_id, db_path=db_path)
+    if question is None:
+        logger.debug("Modal submission on unknown question %s — ignored", question_id)
+        return
+
+    session = get_session(question.session_id, db_path=db_path)
+    if session is None:
+        logger.debug("Session for question %s vanished — ignoring submission", question_id)
+        return
+
+    # Remember whether this is the first answer so we can decide on resume;
+    # a re-submission on an already-answered question persists the new
+    # value but must NOT schedule a duplicate resume.
+    was_already_answered = question.answer is not None
+
+    # Persist the answer through the same primitives the CLI uses.
+    answer_question(question.id, answer, db_path=db_path)
+    sync_pending_questions(question.session_id, db_path=db_path)
+
+    # Refresh the question (now carries answer/answered_at) for UI updates.
+    answered = get_question(question.id, db_path=db_path) or question
+    update_question_message(client, session, answered, answered=True)
+    post_question_ack(client, session, answered, answer)
+
+    if was_already_answered:
+        return
+
+    remaining = list_pending_questions(question.session_id, db_path=db_path)
+    if not remaining:
+        # Last question answered — resume the pipeline off the Socket Mode thread.
+        event_callback = _make_event_callback(client, db_path)
+        executor.submit(
+            _resume_pipeline_bg,
+            question.session_id,
+            db_path,
+            event_callback,
+        )

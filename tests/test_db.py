@@ -28,6 +28,8 @@ from squad.db import (
     list_plans,
     list_session_history,
     mark_phase_skipped,
+    get_question,
+    update_question_slack_message_ts,
     update_session_failure_reason,
     update_session_profile,
     update_session_status,
@@ -453,3 +455,35 @@ class TestFailureReason:
         ensure_schema(db_path)
         fetched = get_session(s.id, db_path=db_path)
         assert fetched.failure_reason == "boom"
+
+
+# ── question slack_message_ts (LOT 4 — Plan 4) ────────────────────────────────
+
+
+class TestQuestionSlackMessageTs:
+    def test_default_is_none(self, db_path: Path):
+        s = _session(db_path)
+        q = create_question(s.id, "pm", PHASE_CADRAGE, "Why?", db_path=db_path)
+        fetched = get_question(q.id, db_path=db_path)
+        assert fetched is not None
+        assert fetched.slack_message_ts is None
+
+    def test_update_and_read_back(self, db_path: Path):
+        s = _session(db_path)
+        q = create_question(s.id, "pm", PHASE_CADRAGE, "Why?", db_path=db_path)
+        update_question_slack_message_ts(q.id, "1700000000.000100", db_path=db_path)
+        fetched = get_question(q.id, db_path=db_path)
+        assert fetched.slack_message_ts == "1700000000.000100"
+
+    def test_get_question_unknown_returns_none(self, db_path: Path):
+        assert get_question("ghost", db_path=db_path) is None
+
+    def test_migration_keeps_existing_rows(self, db_path: Path):
+        s = _session(db_path)
+        q = create_question(s.id, "pm", PHASE_CADRAGE, "Why?", db_path=db_path)
+        # Re-applying schema must not drop or reset the new column.
+        ensure_schema(db_path)
+        update_question_slack_message_ts(q.id, "1700000000.000200", db_path=db_path)
+        ensure_schema(db_path)
+        fetched = get_question(q.id, db_path=db_path)
+        assert fetched.slack_message_ts == "1700000000.000200"

@@ -244,6 +244,27 @@ class TestQuestion:
         assert q.answer is None
         assert q.answered_at is None
 
+    def test_slack_message_ts_defaults_none(self):
+        q = Question(
+            id="q-1",
+            session_id="sess-1",
+            agent="pm",
+            phase=PHASE_CADRAGE,
+            question="?",
+        )
+        assert q.slack_message_ts is None
+
+    def test_slack_message_ts_roundtrip(self):
+        q = Question(
+            id="q-1",
+            session_id="sess-1",
+            agent="pm",
+            phase=PHASE_CADRAGE,
+            question="?",
+            slack_message_ts="1700000000.000100",
+        )
+        assert q.slack_message_ts == "1700000000.000100"
+
 
 class TestGeneratedPlan:
     def test_instantiation(self):

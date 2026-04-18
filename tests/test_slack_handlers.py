@@ -332,3 +332,201 @@ class TestFileShared:
                 event={"file_id": "F123"}, client=client, db_path=db_path, config=cfg
             )
         m_download.assert_not_called()
+
+
+# ── Question actions + modal (LOT 4) ──────────────────────────────────────────
+
+
+from squad.db import (  # noqa: E402
+    answer_question as _answer_question,
+    create_question,
+    get_question,
+    list_pending_questions,
+)
+from squad.slack_handlers import (  # noqa: E402
+    handle_question_action,
+    handle_question_submission,
+)
+from squad.slack_service import (  # noqa: E402
+    QUESTION_MODAL_INPUT_ACTION_ID,
+    QUESTION_MODAL_INPUT_BLOCK_ID,
+)
+
+
+def _make_view(question_id: str, answer: str) -> dict:
+    return {
+        "private_metadata": question_id,
+        "state": {
+            "values": {
+                QUESTION_MODAL_INPUT_BLOCK_ID: {
+                    QUESTION_MODAL_INPUT_ACTION_ID: {"value": answer}
+                }
+            }
+        },
+    }
+
+
+@pytest.fixture
+def interviewing_session(db_path, config, executor, client):
+    """Create a Squad session from Slack with a thread_ts and two pending questions."""
+    cfg = dict(config)
+    session = _slack_session(db_path, cfg, executor, client)
+    update_session_slack_thread(session.id, "1700000000.000100", db_path=db_path)
+    q1 = create_question(session.id, "pm", "cadrage", "Quel segment ?", db_path=db_path)
+    q2 = create_question(session.id, "pm", "cadrage", "Quel prix ?", db_path=db_path)
+    return session, [q1, q2]
+
+
+class TestQuestionAction:
+    def test_opens_modal_with_question_id(self, db_path, interviewing_session, client):
+        _, questions = interviewing_session
+        q1 = questions[0]
+        body = {
+            "trigger_id": "T123",
+            "actions": [{"value": q1.id, "action_id": "squad_question_answer"}],
+        }
+        handle_question_action(body=body, client=client, db_path=db_path)
+        client.views_open.assert_called_once()
+        kwargs = client.views_open.call_args.kwargs
+        assert kwargs["trigger_id"] == "T123"
+        assert kwargs["view"]["private_metadata"] == q1.id
+
+    def test_question_action_ignored_outside_session(self, db_path, client):
+        # No session / no question matches this id
+        body = {
+            "trigger_id": "T999",
+            "actions": [{"value": "nonexistent-id", "action_id": "squad_question_answer"}],
+        }
+        handle_question_action(body=body, client=client, db_path=db_path)
+        client.views_open.assert_not_called()
+
+    def test_ignored_on_already_answered_question(self, db_path, interviewing_session, client):
+        _, questions = interviewing_session
+        q1 = questions[0]
+        _answer_question(q1.id, "an answer", db_path=db_path)
+        body = {
+            "trigger_id": "T123",
+            "actions": [{"value": q1.id, "action_id": "squad_question_answer"}],
+        }
+        handle_question_action(body=body, client=client, db_path=db_path)
+        client.views_open.assert_not_called()
+
+    def test_missing_trigger_id_silently_ignored(self, db_path, interviewing_session, client):
+        _, questions = interviewing_session
+        body = {"actions": [{"value": questions[0].id}]}
+        handle_question_action(body=body, client=client, db_path=db_path)
+        client.views_open.assert_not_called()
+
+
+class TestQuestionSubmission:
+    def test_persists_answer_and_syncs_pending(
+        self, db_path, interviewing_session, executor, client
+    ):
+        session, questions = interviewing_session
+        q1 = questions[0]
+        view = _make_view(q1.id, "SMBs")
+        handle_question_submission(
+            body={},
+            view=view,
+            client=client,
+            db_path=db_path,
+            executor=executor,
+        )
+        fetched = get_question(q1.id, db_path=db_path)
+        assert fetched.answer == "SMBs"
+        # pending.json synced
+        pending_file = Path(session.workspace_path) / "questions" / "pending.json"
+        assert pending_file.exists()
+
+    def test_question_modal_submission_triggers_resume(
+        self, db_path, interviewing_session, executor, client
+    ):
+        session, questions = interviewing_session
+        q1, q2 = questions
+        # Pre-answer the first question via DB, then submit the second (last) via Slack
+        _answer_question(q1.id, "answer1", db_path=db_path)
+
+        view = _make_view(q2.id, "answer2")
+        handle_question_submission(
+            body={},
+            view=view,
+            client=client,
+            db_path=db_path,
+            executor=executor,
+        )
+        # All questions answered → resume scheduled exactly once
+        assert list_pending_questions(session.id, db_path=db_path) == []
+        resumes = [s for s in executor.submitted if "_resume_pipeline_bg" in s[0].__name__]
+        assert len(resumes) == 1
+        assert resumes[0][1][0] == session.id
+
+    def test_not_last_question_does_not_resume(
+        self, db_path, interviewing_session, executor, client
+    ):
+        _, questions = interviewing_session
+        q1 = questions[0]
+        view = _make_view(q1.id, "answer1")
+        handle_question_submission(
+            body={},
+            view=view,
+            client=client,
+            db_path=db_path,
+            executor=executor,
+        )
+        resumes = [s for s in executor.submitted if "_resume_pipeline_bg" in s[0].__name__]
+        assert resumes == []
+
+    def test_double_submit_last_wins_no_double_resume(
+        self, db_path, interviewing_session, executor, client
+    ):
+        session, questions = interviewing_session
+        q1, q2 = questions
+        _answer_question(q1.id, "answer1", db_path=db_path)
+
+        # Submit twice for q2 — second answer should win, still exactly one resume
+        for answer_text in ("first", "second-and-winning"):
+            handle_question_submission(
+                body={},
+                view=_make_view(q2.id, answer_text),
+                client=client,
+                db_path=db_path,
+                executor=executor,
+            )
+
+        fetched = get_question(q2.id, db_path=db_path)
+        assert fetched.answer == "second-and-winning"
+        resumes = [s for s in executor.submitted if "_resume_pipeline_bg" in s[0].__name__]
+        # Two submissions, two schedules is acceptable? The spec says
+        # "pas de reprise doublonnée" — we want at most one. Our code
+        # schedules each time the last remaining question gets answered;
+        # after the first submit no pending remain, so the second submit
+        # also sees zero pending → another schedule. Expected real behaviour:
+        # the pipeline itself handles idempotence. But the plan is strict:
+        # verify only one was scheduled.
+        # Accept: the second submission updates the answer but ideally
+        # doesn't double-resume. We enforce that here.
+        assert len(resumes) <= 1
+
+    def test_unknown_question_silently_ignored(self, db_path, executor, client):
+        view = _make_view("ghost", "x")
+        handle_question_submission(
+            body={},
+            view=view,
+            client=client,
+            db_path=db_path,
+            executor=executor,
+        )
+        assert executor.submitted == []
+
+    def test_empty_answer_ignored(self, db_path, interviewing_session, executor, client):
+        _, questions = interviewing_session
+        view = _make_view(questions[0].id, "   ")
+        handle_question_submission(
+            body={},
+            view=view,
+            client=client,
+            db_path=db_path,
+            executor=executor,
+        )
+        fetched = get_question(questions[0].id, db_path=db_path)
+        assert fetched.answer is None
