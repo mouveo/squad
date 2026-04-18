@@ -431,3 +431,108 @@ class TestRunResearchLive:
 
     def test_end_to_end_live_call(self, session, db_path):
         pytest.skip("Requires live Claude CLI; enable explicitly with -m integration")
+
+
+# ── LOT 7 — prompt directives + cwd forwarding ────────────────────────────────
+
+
+class TestBuildResearchPromptDirectives:
+    def _axes(self):
+        return ["Landscape", "Pain points", "Patterns"]
+
+    def test_rich_adds_gap_filling_directive(self):
+        prompt = build_research_prompt(
+            idea="x",
+            axes=self._axes(),
+            budget=NORMAL_BUDGET,
+            input_richness="rich",
+        )
+        assert "combler les angles morts" in prompt
+        assert "généraliste" in prompt
+
+    def test_sparse_omits_gap_filling_directive(self):
+        prompt = build_research_prompt(
+            idea="x",
+            axes=self._axes(),
+            budget=NORMAL_BUDGET,
+            input_richness="sparse",
+        )
+        assert "combler les angles morts" not in prompt
+
+    def test_none_richness_omits_directive(self):
+        prompt = build_research_prompt(
+            idea="x",
+            axes=self._axes(),
+            budget=NORMAL_BUDGET,
+        )
+        assert "combler les angles morts" not in prompt
+
+    def test_benchmark_all_angles_adds_coverage_directive(self):
+        prompt = build_research_prompt(
+            idea="x",
+            axes=self._axes(),
+            budget=NORMAL_BUDGET,
+            benchmark_all_angles=True,
+        )
+        assert "UN SEUL rapport" in prompt
+        assert "Mutualise" in prompt or "mutualis" in prompt.lower()
+
+    def test_benchmark_all_false_omits_coverage_directive(self):
+        prompt = build_research_prompt(
+            idea="x",
+            axes=self._axes(),
+            budget=NORMAL_BUDGET,
+            benchmark_all_angles=False,
+        )
+        assert "UN SEUL rapport" not in prompt
+
+
+class TestRunResearchCwdForwarding:
+    def test_forwards_existing_project_path(self, session, db_path):
+        with patch("squad.research.run_task_text", return_value="# r") as mock_exec:
+            run_research(session.id, db_path=db_path)
+        assert mock_exec.call_args.kwargs["cwd"] == session.project_path
+
+    def test_falls_back_when_project_path_missing(
+        self, session, db_path, tmp_path, caplog
+    ):
+        from squad.db import _now, _open
+
+        ghost = tmp_path / "ghost"
+        _open(db_path)["sessions"].update(
+            session.id,
+            {"project_path": str(ghost), "updated_at": _now()},
+        )
+        with patch("squad.research.run_task_text", return_value="# r") as mock_exec:
+            with caplog.at_level("WARNING"):
+                run_research(session.id, db_path=db_path)
+        assert mock_exec.call_args.kwargs["cwd"] is None
+        assert any("does not exist" in r.message for r in caplog.records)
+
+    def test_forwards_input_richness_into_prompt(self, session, db_path):
+        from squad.db import update_input_richness
+
+        update_input_richness(db_path, session.id, "rich")
+        captured: dict[str, str] = {}
+
+        def _capture(prompt, **_kwargs):
+            captured["prompt"] = prompt
+            return "# r"
+
+        with patch("squad.research.run_task_text", side_effect=_capture):
+            run_research(session.id, db_path=db_path)
+        assert "combler les angles morts" in captured["prompt"]
+
+    def test_forwards_benchmark_all_into_prompt(self, session, db_path):
+        from squad.db import set_benchmark_all_angles
+
+        set_benchmark_all_angles(db_path, session.id, True)
+        captured: dict[str, str] = {}
+
+        def _capture(prompt, **_kwargs):
+            captured["prompt"] = prompt
+            return "# r"
+
+        with patch("squad.research.run_task_text", side_effect=_capture):
+            run_research(session.id, db_path=db_path)
+        assert "UN SEUL rapport" in captured["prompt"]
