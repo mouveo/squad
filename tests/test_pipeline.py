@@ -1,8 +1,9 @@
 """Tests for squad/pipeline.py — happy path, pause, retry, resume, failures."""
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -840,3 +841,90 @@ class TestCwdRoutingByAgent:
 
         assert captured
         assert captured[0]["ux"] is None
+
+
+# ── smoke: pipeline -> executor (LOT 5 — Plan 5) ──────────────────────────────
+
+
+class TestPipelineExecutorSmoke:
+    """End-to-end smoke tests from pipeline through the real executor code.
+
+    Only ``squad.executor._call_claude_cli`` is mocked — the pipeline
+    calls ``run_agent`` / ``run_agents_tolerant`` as usual, agent
+    markdowns are parsed for real, and the subprocess argv (including
+    ``--allowedTools`` and ``cwd``) is captured at the last hop before
+    the real CLI would be invoked. These are intentionally *not* marked
+    ``@pytest.mark.integration`` because no real Claude process is
+    launched.
+    """
+
+    @staticmethod
+    def _fake_completed(text: str = "ok output") -> MagicMock:
+        mock = MagicMock()
+        mock.stdout = json.dumps({"type": "text", "text": text})
+        mock.returncode = 0
+        mock.stderr = ""
+        return mock
+
+    def _capture_calls(self):
+        calls: list[dict] = []
+
+        def fake(cmd, timeout, cwd=None):
+            calls.append({"cmd": list(cmd), "cwd": cwd})
+            return self._fake_completed()
+
+        return calls, fake
+
+    @staticmethod
+    def _calls_for_agent(calls: list[dict], agent_name: str) -> list[dict]:
+        header = f"# Agent: {agent_name}\n"
+        return [c for c in calls if c["cmd"][-1].startswith(header)]
+
+    @staticmethod
+    def _tools_of(call: dict) -> str:
+        for arg in call["cmd"]:
+            if isinstance(arg, str) and arg.startswith("--allowedTools="):
+                return arg.split("=", 1)[1]
+        return ""
+
+    def test_ux_gets_exploration_tools_and_cwd_end_to_end(self, db_path, session):
+        calls, fake = self._capture_calls()
+        with patch("squad.executor._call_claude_cli", side_effect=fake):
+            run_phase(session.id, PHASE_ETAT_DES_LIEUX, db_path=db_path)
+
+        ux_calls = self._calls_for_agent(calls, "ux")
+        assert len(ux_calls) == 1, "ux should be invoked exactly once in etat_des_lieux"
+        assert self._tools_of(ux_calls[0]) == "Read,WebSearch,WebFetch,Glob,LS,Grep"
+        assert ux_calls[0]["cwd"] == session.project_path
+
+    def test_customer_success_keeps_read_only_without_cwd(self, db_path, session):
+        calls, fake = self._capture_calls()
+        with patch("squad.executor._call_claude_cli", side_effect=fake):
+            run_phase(session.id, PHASE_ETAT_DES_LIEUX, db_path=db_path)
+
+        cs_calls = self._calls_for_agent(calls, "customer-success")
+        assert len(cs_calls) == 1
+        assert self._tools_of(cs_calls[0]) == "Read"
+        assert cs_calls[0]["cwd"] is None
+
+    def test_sales_keeps_web_tools_without_project_cwd(self, db_path, session):
+        calls, fake = self._capture_calls()
+        with patch("squad.executor._call_claude_cli", side_effect=fake):
+            run_phase(session.id, PHASE_ETAT_DES_LIEUX, db_path=db_path)
+
+        sales_calls = self._calls_for_agent(calls, "sales")
+        assert len(sales_calls) == 1
+        assert self._tools_of(sales_calls[0]) == "Read,WebSearch,WebFetch"
+        assert sales_calls[0]["cwd"] is None
+
+    def test_architect_gets_exploration_tools_and_cwd_in_challenge(
+        self, db_path, session
+    ):
+        calls, fake = self._capture_calls()
+        with patch("squad.executor._call_claude_cli", side_effect=fake):
+            run_phase(session.id, PHASE_CHALLENGE, db_path=db_path)
+
+        architect_calls = self._calls_for_agent(calls, "architect")
+        assert len(architect_calls) == 1
+        assert self._tools_of(architect_calls[0]) == "Read,WebSearch,WebFetch,Glob,LS,Grep"
+        assert architect_calls[0]["cwd"] == session.project_path
