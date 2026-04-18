@@ -1,15 +1,27 @@
 """Tests for squad.slack_service — channel resolution, allowlist, session creation."""
 
+from datetime import datetime
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
 from squad.db import ensure_schema, get_session, list_active_sessions
+from squad.models import (
+    EVENT_FAILED,
+    EVENT_INTERVIEWING,
+    EVENT_REVIEW,
+    EVENT_WORKING,
+    PipelineEvent,
+    Session,
+)
 from squad.slack_service import (
     SlackResolutionError,
     assert_user_allowed,
     create_session_from_slack,
+    format_pipeline_event,
     format_root_message,
+    post_pipeline_event,
     record_thread_ts,
     resolve_project_path,
 )
@@ -181,3 +193,116 @@ class TestFormatRootMessage:
         msg = format_root_message(session)
         assert session.id[:8] in msg
         assert "Improve CRM" in msg
+
+
+# ── Pipeline events (LOT 2) ────────────────────────────────────────────────────
+
+
+def _event(type_: str, **overrides) -> PipelineEvent:
+    base = dict(
+        type=type_,
+        session_id="sess-1",
+        timestamp_utc=datetime(2026, 4, 18, 10, 25, 13),
+        elapsed_seconds=125.0,
+    )
+    base.update(overrides)
+    return PipelineEvent(**base)
+
+
+def test_post_pipeline_event(tmp_path):
+    """Covers working, interviewing, review and failed rendering + posting."""
+    session = Session(
+        id="sess-1",
+        title="Test",
+        project_path="/tmp/proj",
+        workspace_path=str(tmp_path / "ws"),
+        idea="x",
+        slack_channel="C999",
+        slack_thread_ts="1700000000.000100",
+    )
+    client = MagicMock()
+
+    events = [
+        _event(EVENT_WORKING, phase="cadrage"),
+        _event(EVENT_INTERVIEWING, phase="cadrage", pending_questions=3),
+        _event(EVENT_REVIEW, plans_count=2, elapsed_seconds=3605),
+        _event(EVENT_FAILED, failure_reason="pm exploded"),
+    ]
+    for evt in events:
+        post_pipeline_event(evt, session, client)
+
+    assert client.chat_postMessage.call_count == 4
+    kwargs = [c.kwargs for c in client.chat_postMessage.call_args_list]
+    for k in kwargs:
+        assert k["channel"] == "C999"
+        assert k["thread_ts"] == "1700000000.000100"
+
+    working_text = kwargs[0]["text"]
+    assert "Cadrage" in working_text or "cadrage" in working_text
+    assert "2026-04-18" in working_text
+
+    interviewing_text = kwargs[1]["text"]
+    assert "3 question" in interviewing_text
+
+    review_text = kwargs[2]["text"]
+    assert "2 plan" in review_text
+    assert "1h" in review_text  # 3605s → 1h ...
+
+    failed_text = kwargs[3]["text"]
+    assert "pm exploded" in failed_text
+
+
+def test_post_pipeline_event_noop_without_thread(tmp_path):
+    """Sessions not created from Slack must not attempt any post."""
+    session = Session(
+        id="sess-1",
+        title="Test",
+        project_path="/tmp/proj",
+        workspace_path=str(tmp_path / "ws"),
+        idea="x",
+    )
+    client = MagicMock()
+    post_pipeline_event(_event(EVENT_WORKING, phase="cadrage"), session, client)
+    client.chat_postMessage.assert_not_called()
+
+
+def test_post_pipeline_event_swallows_slack_errors(tmp_path):
+    """A failing Slack client must not propagate out of the observer."""
+    session = Session(
+        id="sess-1",
+        title="Test",
+        project_path="/tmp/proj",
+        workspace_path=str(tmp_path / "ws"),
+        idea="x",
+        slack_channel="C999",
+        slack_thread_ts="1700000000.000100",
+    )
+    client = MagicMock()
+    client.chat_postMessage.side_effect = RuntimeError("slack down")
+    # Should NOT raise
+    post_pipeline_event(_event(EVENT_WORKING, phase="cadrage"), session, client)
+
+
+class TestFormatPipelineEvent:
+    def test_working_includes_phase_and_timestamp(self):
+        txt = format_pipeline_event(_event(EVENT_WORKING, phase="cadrage"))
+        assert "cadrage" in txt
+        assert "UTC" in txt
+        assert "écoulé" in txt
+
+    def test_interviewing_includes_pending_count(self):
+        txt = format_pipeline_event(_event(EVENT_INTERVIEWING, pending_questions=5))
+        assert "5 question" in txt
+
+    def test_review_includes_plans_and_total_duration(self):
+        txt = format_pipeline_event(_event(EVENT_REVIEW, plans_count=3))
+        assert "3 plan" in txt
+        assert "durée totale" in txt
+
+    def test_failed_includes_reason(self):
+        txt = format_pipeline_event(_event(EVENT_FAILED, failure_reason="boom"))
+        assert "boom" in txt
+
+    def test_failed_without_reason_uses_placeholder(self):
+        txt = format_pipeline_event(_event(EVENT_FAILED))
+        assert "inconnue" in txt

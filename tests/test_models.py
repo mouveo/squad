@@ -29,12 +29,18 @@ from squad.constants import (
     STATUS_WORKING,
 )
 from squad.models import (
+    EVENT_FAILED,
+    EVENT_INTERVIEWING,
+    EVENT_REVIEW,
+    EVENT_WORKING,
+    PIPELINE_EVENT_TYPES,
     RESEARCH_DEPTH_DEEP,
     RESEARCH_DEPTH_LIGHT,
     RESEARCH_DEPTH_NORMAL,
     RESEARCH_DEPTHS,
     GeneratedPlan,
     PhaseOutput,
+    PipelineEvent,
     Question,
     Session,
     SessionMode,
@@ -348,3 +354,75 @@ class TestSessionSlackFields:
         assert s.slack_channel == "C999"
         assert s.slack_thread_ts == "1700000000.000100"
         assert s.slack_user_id == "U123"
+
+    def test_failure_reason_default_none(self):
+        s = self._make()
+        assert s.failure_reason is None
+
+    def test_failure_reason_roundtrip(self):
+        s = self._make(failure_reason="pm exploded")
+        assert s.failure_reason == "pm exploded"
+
+
+# ── Pipeline events (LOT 2 — Plan 4) ──────────────────────────────────────────
+
+
+class TestPipelineEvent:
+    def test_all_event_types_present(self):
+        assert set(PIPELINE_EVENT_TYPES) == {
+            EVENT_WORKING,
+            EVENT_INTERVIEWING,
+            EVENT_REVIEW,
+            EVENT_FAILED,
+        }
+
+    def test_instantiation_with_defaults(self):
+        from datetime import datetime
+
+        e = PipelineEvent(
+            type=EVENT_WORKING,
+            session_id="s1",
+            timestamp_utc=datetime.utcnow(),
+            elapsed_seconds=42.0,
+            phase="cadrage",
+        )
+        assert e.type == EVENT_WORKING
+        assert e.phase == "cadrage"
+        assert e.pending_questions == 0
+        assert e.plans_count == 0
+        assert e.failure_reason is None
+
+    def test_invalid_type_rejected(self):
+        from datetime import datetime
+
+        with pytest.raises(ValueError, match="Invalid pipeline event type"):
+            PipelineEvent(
+                type="nope",
+                session_id="s1",
+                timestamp_utc=datetime.utcnow(),
+                elapsed_seconds=0.0,
+            )
+
+    def test_review_event_carries_plan_count(self):
+        from datetime import datetime
+
+        e = PipelineEvent(
+            type=EVENT_REVIEW,
+            session_id="s1",
+            timestamp_utc=datetime.utcnow(),
+            elapsed_seconds=600.0,
+            plans_count=3,
+        )
+        assert e.plans_count == 3
+
+    def test_failed_event_carries_reason(self):
+        from datetime import datetime
+
+        e = PipelineEvent(
+            type=EVENT_FAILED,
+            session_id="s1",
+            timestamp_utc=datetime.utcnow(),
+            elapsed_seconds=600.0,
+            failure_reason="critical agent pm failed",
+        )
+        assert e.failure_reason == "critical agent pm failed"

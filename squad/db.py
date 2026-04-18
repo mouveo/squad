@@ -63,6 +63,7 @@ def _to_session(row: dict) -> Session:
         slack_channel=row.get("slack_channel"),
         slack_thread_ts=row.get("slack_thread_ts"),
         slack_user_id=row.get("slack_user_id"),
+        failure_reason=row.get("failure_reason"),
     )
 
 
@@ -136,6 +137,8 @@ def ensure_schema(db_path: Path | None = None) -> None:
             "slack_channel": str,
             "slack_thread_ts": str,
             "slack_user_id": str,
+            # Failure context (Plan 4 — LOT 2)
+            "failure_reason": str,
         },
         pk="id",
         not_null={"title", "project_path", "workspace_path", "idea", "status"},
@@ -156,6 +159,7 @@ def ensure_schema(db_path: Path | None = None) -> None:
         ("slack_channel", str),
         ("slack_thread_ts", str),
         ("slack_user_id", str),
+        ("failure_reason", str),
     ):
         if col not in session_cols:
             db["sessions"].add_column(col, col_type)
@@ -257,6 +261,7 @@ def create_session(
         "slack_channel": slack_channel,
         "slack_thread_ts": slack_thread_ts,
         "slack_user_id": slack_user_id,
+        "failure_reason": None,
     }
     db["sessions"].insert(row)
     return _to_session(row)
@@ -296,6 +301,25 @@ def update_session_slack_thread(
     db["sessions"].update(
         session_id,
         {"slack_thread_ts": slack_thread_ts, "updated_at": _now()},
+    )
+
+
+def update_session_failure_reason(
+    session_id: str,
+    reason: str,
+    db_path: Path | None = None,
+) -> None:
+    """Persist a short failure reason on the session row.
+
+    Called when the pipeline terminates in ``failed`` and (later) when a
+    human reviewer rejects the session with a reason — both flows share
+    this column so Slack and the CLI can surface a single consistent
+    explanation.
+    """
+    db = _open(db_path)
+    db["sessions"].update(
+        session_id,
+        {"failure_reason": reason, "updated_at": _now()},
     )
 
 

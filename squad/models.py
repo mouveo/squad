@@ -72,6 +72,8 @@ class Session:
     slack_channel: str | None = None
     slack_thread_ts: str | None = None
     slack_user_id: str | None = None
+    # Persisted failure explanation (pipeline crash or human rejection)
+    failure_reason: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in SESSION_STATUSES:
@@ -136,3 +138,47 @@ class GeneratedPlan:
     content: str
     forge_status: str | None = None
     created_at: datetime = field(default_factory=datetime.utcnow)
+
+
+# ── Pipeline events (Plan 4 — LOT 2) ──────────────────────────────────────────
+
+# Event type constants — emitted by ``squad.pipeline`` as the session
+# moves through its states. Consumers (Slack live-updates, future UIs)
+# match on ``PipelineEvent.type``.
+EVENT_WORKING = "working"
+EVENT_INTERVIEWING = "interviewing"
+EVENT_REVIEW = "review"
+EVENT_FAILED = "failed"
+
+PIPELINE_EVENT_TYPES: tuple[str, ...] = (
+    EVENT_WORKING,
+    EVENT_INTERVIEWING,
+    EVENT_REVIEW,
+    EVENT_FAILED,
+)
+
+
+@dataclass
+class PipelineEvent:
+    """Structured event emitted by the pipeline for async consumers.
+
+    ``type`` is the session state the event represents. ``phase`` is the
+    canonical phase identifier when relevant (set on every
+    ``working`` event, and on ``interviewing`` events where the pause
+    originates in a specific phase). ``elapsed_seconds`` is measured
+    from the session's ``created_at`` so resume flows still report a
+    useful duration.
+    """
+
+    type: str
+    session_id: str
+    timestamp_utc: datetime
+    elapsed_seconds: float
+    phase: str | None = None
+    pending_questions: int = 0
+    plans_count: int = 0
+    failure_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.type not in PIPELINE_EVENT_TYPES:
+            raise ValueError(f"Invalid pipeline event type: {self.type!r}")

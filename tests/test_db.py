@@ -28,6 +28,7 @@ from squad.db import (
     list_plans,
     list_session_history,
     mark_phase_skipped,
+    update_session_failure_reason,
     update_session_profile,
     update_session_status,
 )
@@ -421,3 +422,34 @@ class TestPhaseOutputAttempt:
         latest = list_phase_outputs(s.id, phase=PHASE_CONCEPTION, attempt=2, db_path=db_path)
         assert len(latest) == 1
         assert latest[0].output == "retry"
+
+
+# ── failure_reason (LOT 2 — Plan 4) ───────────────────────────────────────────
+
+
+class TestFailureReason:
+    def test_default_is_none(self, db_path: Path):
+        s = _session(db_path)
+        fetched = get_session(s.id, db_path=db_path)
+        assert fetched.failure_reason is None
+
+    def test_update_and_read_back(self, db_path: Path):
+        s = _session(db_path)
+        update_session_failure_reason(s.id, "pm exploded", db_path=db_path)
+        fetched = get_session(s.id, db_path=db_path)
+        assert fetched.failure_reason == "pm exploded"
+
+    def test_update_bumps_updated_at(self, db_path: Path):
+        s = _session(db_path)
+        before = get_session(s.id, db_path=db_path).updated_at
+        update_session_failure_reason(s.id, "boom", db_path=db_path)
+        after = get_session(s.id, db_path=db_path).updated_at
+        assert after >= before
+
+    def test_failure_reason_survives_schema_reapply(self, db_path: Path):
+        s = _session(db_path)
+        update_session_failure_reason(s.id, "boom", db_path=db_path)
+        # Idempotent schema migration must not overwrite the column.
+        ensure_schema(db_path)
+        fetched = get_session(s.id, db_path=db_path)
+        assert fetched.failure_reason == "boom"

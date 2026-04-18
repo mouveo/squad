@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from squad.constants import (
     PHASE_CADRAGE,
@@ -42,11 +44,21 @@ from squad.db import (
     create_question,
     get_session,
     increment_phase_attempt,
+    list_pending_questions,
+    list_plans,
+    update_session_failure_reason,
     update_session_status,
 )
 from squad.constants import PHASE_BENCHMARK
 from squad.executor import AgentError, run_agent, run_agents_tolerant
 from squad.forge_format import ForgeFormatError
+from squad.models import (
+    EVENT_FAILED,
+    EVENT_INTERVIEWING,
+    EVENT_REVIEW,
+    EVENT_WORKING,
+    PipelineEvent,
+)
 from squad.phase_config import (
     PhaseConfig,
     get_phase_config,
@@ -72,6 +84,9 @@ from squad.recovery import (
     record_conception_retry,
 )
 from squad.workspace import write_pending_questions, write_phase_output
+
+# Type alias for the optional Slack/observer callback
+EventCallback = Callable[[PipelineEvent], None]
 
 logger = logging.getLogger(__name__)
 
@@ -279,12 +294,50 @@ def run_phase(
     return result
 
 
+def _emit_event(
+    callback: EventCallback | None,
+    *,
+    session_id: str,
+    started_at: datetime,
+    type: str,
+    phase: str | None = None,
+    pending_questions: int = 0,
+    plans_count: int = 0,
+    failure_reason: str | None = None,
+) -> None:
+    """Send a pipeline event to ``callback`` and swallow observer errors.
+
+    Observer exceptions must never take down the pipeline — they are
+    logged and then suppressed so a misbehaving Slack sink cannot turn
+    a successful session into a failed one.
+    """
+    if callback is None:
+        return
+    now = datetime.utcnow()
+    elapsed = max(0.0, (now - started_at).total_seconds())
+    event = PipelineEvent(
+        type=type,
+        session_id=session_id,
+        timestamp_utc=now,
+        elapsed_seconds=elapsed,
+        phase=phase,
+        pending_questions=pending_questions,
+        plans_count=plans_count,
+        failure_reason=failure_reason,
+    )
+    try:
+        callback(event)
+    except Exception:  # noqa: BLE001
+        logger.exception("Pipeline event callback raised for event %r", type)
+
+
 def run_pipeline(
     session_id: str,
     db_path: Path | None = None,
     start_phase: str | None = None,
     *,
     phase_instruction: str | None = None,
+    event_callback: EventCallback | None = None,
 ) -> None:
     """Execute the phases from ``start_phase`` onward.
 
@@ -296,10 +349,17 @@ def run_pipeline(
     triggered when ``squad.recovery.can_retry_conception`` returns True.
     ``phase_instruction`` applies only to the first phase executed — it
     lets callers inject constraints on a resumed retry run.
+
+    ``event_callback`` is an optional observer invoked on every
+    ``working/<phase>``, ``interviewing``, ``review`` and ``failed``
+    transition. Observer errors are logged and suppressed so a faulty
+    sink never affects pipeline outcome.
     """
     session = get_session(session_id, db_path=db_path)
     if session is None:
         raise PipelineError(f"Session not found: {session_id!r}")
+
+    started_at = session.created_at or datetime.utcnow()
 
     start_idx = 0
     if start_phase is not None:
@@ -321,6 +381,13 @@ def run_pipeline(
                 cfg.order,
                 phase_idx,
             )
+            _emit_event(
+                event_callback,
+                session_id=session_id,
+                started_at=started_at,
+                type=EVENT_WORKING,
+                phase=cfg.phase,
+            )
             result = run_phase(
                 session_id,
                 cfg.phase,
@@ -329,6 +396,15 @@ def run_pipeline(
             )
             if result.paused:
                 logger.info("Pipeline paused at %s: %s", cfg.phase, result.pause_reason)
+                pending = list_pending_questions(session_id, db_path=db_path)
+                _emit_event(
+                    event_callback,
+                    session_id=session_id,
+                    started_at=started_at,
+                    type=EVENT_INTERVIEWING,
+                    phase=cfg.phase,
+                    pending_questions=len(pending),
+                )
                 return
 
             if cfg.phase == PHASE_CHALLENGE and can_retry_conception(session_id, db_path=db_path):
@@ -344,11 +420,20 @@ def run_pipeline(
                 continue
 
             phase_idx += 1
-    except (AgentError, PipelineError):
+    except (AgentError, PipelineError) as exc:
+        reason = str(exc) or type(exc).__name__
+        update_session_failure_reason(session_id, reason, db_path=db_path)
         update_session_status(
             session_id=session_id,
             status=STATUS_FAILED,
             db_path=db_path,
+        )
+        _emit_event(
+            event_callback,
+            session_id=session_id,
+            started_at=started_at,
+            type=EVENT_FAILED,
+            failure_reason=reason,
         )
         raise
 
@@ -359,19 +444,36 @@ def run_pipeline(
     try:
         _generate_and_copy_plans(session_id, db_path=db_path)
     except (ValueError, RuntimeError, ForgeFormatError) as exc:
+        reason = f"Plan generation failed: {exc}"
         logger.error("Plan generation failed for session %s: %s", session_id, exc)
+        update_session_failure_reason(session_id, reason, db_path=db_path)
         update_session_status(
             session_id=session_id,
             status=STATUS_FAILED,
             db_path=db_path,
         )
-        raise PipelineError(f"Plan generation failed: {exc}") from exc
+        _emit_event(
+            event_callback,
+            session_id=session_id,
+            started_at=started_at,
+            type=EVENT_FAILED,
+            failure_reason=reason,
+        )
+        raise PipelineError(reason) from exc
 
     update_session_status(
         session_id=session_id,
         status=STATUS_REVIEW,
         current_phase=PHASES[-1],
         db_path=db_path,
+    )
+    plans = list_plans(session_id, db_path=db_path)
+    _emit_event(
+        event_callback,
+        session_id=session_id,
+        started_at=started_at,
+        type=EVENT_REVIEW,
+        plans_count=len(plans),
     )
 
 
@@ -388,7 +490,12 @@ def _generate_and_copy_plans(session_id: str, db_path: Path | None = None) -> No
     logger.info("Copied %d plan file(s) into the target project", len(copied))
 
 
-def resume_pipeline(session_id: str, db_path: Path | None = None) -> ResumePoint | None:
+def resume_pipeline(
+    session_id: str,
+    db_path: Path | None = None,
+    *,
+    event_callback: EventCallback | None = None,
+) -> ResumePoint | None:
     """Resume a session from the point computed by ``determine_resume_point``.
 
     Returns the ``ResumePoint`` actually used, or None when the session is
@@ -408,5 +515,6 @@ def resume_pipeline(session_id: str, db_path: Path | None = None) -> ResumePoint
         db_path=db_path,
         start_phase=resume_point.phase,
         phase_instruction=instruction,
+        event_callback=event_callback,
     )
     return resume_point

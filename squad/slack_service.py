@@ -14,9 +14,16 @@ import uuid
 from pathlib import Path
 
 from squad.config import get_project_state_dir, load_config
-from squad.constants import MODE_APPROVAL, SESSION_MODES
+from squad.constants import MODE_APPROVAL, PHASE_LABELS, SESSION_MODES
 from squad.db import create_session, update_session_slack_thread
-from squad.models import Session
+from squad.models import (
+    EVENT_FAILED,
+    EVENT_INTERVIEWING,
+    EVENT_REVIEW,
+    EVENT_WORKING,
+    PipelineEvent,
+    Session,
+)
 from squad.workspace import create_workspace, get_context, write_context, write_idea
 
 logger = logging.getLogger(__name__)
@@ -143,3 +150,83 @@ def format_root_message(session: Session) -> str:
         f"*Projet* : `{session.project_path}`\n"
         f"_Suivi et questions arrivent dans ce thread._"
     )
+
+
+# ── Pipeline live updates (LOT 2) ─────────────────────────────────────────────
+
+
+def _format_elapsed(seconds: float) -> str:
+    """Return a compact ``h m s`` elapsed-time string (e.g. ``1h 02m 03s``)."""
+    total = max(0, int(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m {secs:02d}s"
+    if minutes:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
+
+
+def _format_utc(ts) -> str:
+    """Return an ISO-like UTC timestamp (second precision) for Slack display."""
+    return ts.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def format_pipeline_event(event: PipelineEvent) -> str:
+    """Render a pipeline event into the threaded Slack message body.
+
+    Always includes the event time (UTC) and the elapsed time since the
+    session started. ``review`` and ``failed`` carry a context-specific
+    summary (plan count, failure reason). Unknown event types fall back
+    to a minimal representation so a mis-typed event never crashes.
+    """
+    stamp = _format_utc(event.timestamp_utc)
+    elapsed = _format_elapsed(event.elapsed_seconds)
+
+    if event.type == EVENT_WORKING:
+        label = PHASE_LABELS.get(event.phase or "", event.phase or "—")
+        return (
+            f":gear: *Phase : {label}* (`{event.phase}`)\n"
+            f"{stamp} · écoulé : {elapsed}"
+        )
+    if event.type == EVENT_INTERVIEWING:
+        plural = "s" if event.pending_questions != 1 else ""
+        return (
+            f":pause_button: *En attente de réponses* — "
+            f"{event.pending_questions} question{plural} en attente\n"
+            f"{stamp} · écoulé : {elapsed}"
+        )
+    if event.type == EVENT_REVIEW:
+        plural = "s" if event.plans_count != 1 else ""
+        return (
+            f":white_check_mark: *Review prête* — {event.plans_count} plan{plural} généré{plural}\n"
+            f"{stamp} · durée totale : {elapsed}"
+        )
+    if event.type == EVENT_FAILED:
+        reason = event.failure_reason or "raison inconnue"
+        return (
+            f":x: *Pipeline échoué* — {reason}\n"
+            f"{stamp} · écoulé : {elapsed}"
+        )
+    return f"{event.type}: {stamp} · écoulé : {elapsed}"
+
+
+def post_pipeline_event(event: PipelineEvent, session: Session, client) -> None:
+    """Post ``event`` in the session's Slack thread if one is recorded.
+
+    Silently no-ops for sessions that were not created from Slack (no
+    ``slack_channel`` / ``slack_thread_ts``). Slack API errors are
+    logged and swallowed so live-updates never break the pipeline.
+    """
+    if not session.slack_channel or not session.slack_thread_ts:
+        return
+    try:
+        client.chat_postMessage(
+            channel=session.slack_channel,
+            thread_ts=session.slack_thread_ts,
+            text=format_pipeline_event(event),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Failed to post pipeline event %r for session %s", event.type, session.id
+        )
