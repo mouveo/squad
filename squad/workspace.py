@@ -45,7 +45,7 @@ def create_workspace(session: Session) -> Path:
     for phase_dir_name in PHASE_DIRS.values():
         (workspace / "phases" / phase_dir_name).mkdir(parents=True, exist_ok=True)
 
-    for subdir in ("questions", "plans", "research"):
+    for subdir in ("questions", "plans", "research", "attachments"):
         (workspace / subdir).mkdir(parents=True, exist_ok=True)
 
     return workspace

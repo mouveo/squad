@@ -29,10 +29,14 @@ from pathlib import Path
 
 from sqlite_utils import Database
 
+from squad.attachment_service import (
+    INLINE_TEXT_EXTENSIONS,
+    list_attachments,
+)
 from squad.config import get_global_db_path
 from squad.constants import PHASE_BENCHMARK, PHASE_CHALLENGE, PHASE_LABELS, PHASES
 from squad.db import get_session, list_phase_outputs
-from squad.models import PhaseOutput
+from squad.models import AttachmentMeta, PhaseOutput
 from squad.phase_contracts import ContractError, parse_blockers_contract
 from squad.workspace import get_context
 
@@ -42,6 +46,10 @@ logger = logging.getLogger(__name__)
 _TARGET_CHARS = 60_000
 # Budget reserved for research/benchmark text within the cumulative context
 _RESEARCH_MAX_CHARS = 16_000
+
+# Per-attachment inlining budget (text files only) and per-session cap.
+_ATTACHMENT_INLINE_PER_FILE = 8_000
+_ATTACHMENT_INLINE_TOTAL = 24_000
 
 # Headings (lowercased) that the structured benchmark summariser prioritises.
 # Ordered groups: each tuple lists equivalent French/English variants and
@@ -197,6 +205,72 @@ def format_qa(questions_and_answers: list[dict]) -> str:
     return "## Q&A\n\n" + "\n\n".join(lines)
 
 
+# ── attachments formatter ──────────────────────────────────────────────────────
+
+
+def _format_size(size_bytes: int) -> str:
+    """Return a short human-readable size string (KB/MB)."""
+    if size_bytes < 1024:
+        return f"{size_bytes} o"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} Ko"
+    return f"{size_bytes / (1024 * 1024):.1f} Mo"
+
+
+def _read_text_attachment(meta: AttachmentMeta, max_chars: int) -> str:
+    """Best-effort UTF-8 read of an inlinable text attachment, capped to ``max_chars``."""
+    try:
+        text = Path(meta.path).read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        logger.warning("Could not read attachment %s: %s", meta.path, exc)
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "\n\n*[Tronqué pour tenir le budget de contexte.]*"
+
+
+def format_attachments(attachments: list[AttachmentMeta]) -> str:
+    """Return the ``## Fichiers joints`` section, or an empty string when none.
+
+    Text files (``md``, ``txt``, ``csv``) are inlined under their own
+    ``###`` sub-heading, capped to a per-file budget; the cumulative
+    inlined text is also bounded so a single PO drop cannot blow up the
+    prompt. Binary files (``pdf``, ``png``, ``jpg``, ``jpeg``) are
+    listed by name, size and mime type without inline content.
+    """
+    if not attachments:
+        return ""
+
+    listing_lines: list[str] = []
+    for meta in attachments:
+        kind = meta.mime_type or f".{meta.extension}" if meta.extension else "fichier"
+        listing_lines.append(
+            f"- `{meta.filename}` — {_format_size(meta.size_bytes)} ({kind})"
+        )
+
+    inline_blocks: list[str] = []
+    used = 0
+    for meta in attachments:
+        if meta.extension not in INLINE_TEXT_EXTENSIONS:
+            continue
+        remaining = _ATTACHMENT_INLINE_TOTAL - used
+        if remaining <= 0:
+            break
+        budget = min(_ATTACHMENT_INLINE_PER_FILE, remaining)
+        body = _read_text_attachment(meta, budget)
+        if not body:
+            continue
+        block = f"### {meta.filename}\n\n```\n{body}\n```"
+        inline_blocks.append(block)
+        used += len(body)
+
+    parts = ["## Fichiers joints", "", *listing_lines]
+    if inline_blocks:
+        parts.append("")
+        parts.extend(inline_blocks)
+    return "\n".join(parts)
+
+
 # ── challenge constraints ──────────────────────────────────────────────────────
 
 
@@ -299,6 +373,11 @@ def build_cumulative_context(
     qa_block = format_qa(_get_answered_questions(session_id, db_path))
     if qa_block:
         parts.append(qa_block)
+
+    # 3b. Slack-attached files (LOT 3 — Plan 4)
+    attachments_block = format_attachments(list_attachments(session_id, db_path=db_path))
+    if attachments_block:
+        parts.append(attachments_block)
 
     # 4 & 5. Preceding phase outputs + challenge constraints
     if current_phase in PHASES:

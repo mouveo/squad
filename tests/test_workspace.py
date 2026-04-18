@@ -73,8 +73,14 @@ class TestCreateWorkspace:
             )
 
     def test_creates_support_dirs(self, workspace: Path):
-        for subdir in ("questions", "plans", "research"):
+        for subdir in ("questions", "plans", "research", "attachments"):
             assert (workspace / subdir).is_dir(), f"Missing directory: {subdir}"
+
+    def test_creates_attachments_dir(self, workspace: Path):
+        # Plan 4 — LOT 3: Slack drag-drops land here.
+        attachments = workspace / "attachments"
+        assert attachments.is_dir()
+        assert list(attachments.iterdir()) == []
 
     def test_no_agent_files_precreated(self, workspace: Path):
         for phase_dir_name in PHASE_DIRS.values():

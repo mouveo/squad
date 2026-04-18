@@ -13,9 +13,11 @@ import logging
 import uuid
 from pathlib import Path
 
-from squad.config import get_project_state_dir, load_config
+from sqlite_utils import Database
+
+from squad.config import get_global_db_path, get_project_state_dir, load_config
 from squad.constants import MODE_APPROVAL, PHASE_LABELS, SESSION_MODES
-from squad.db import create_session, update_session_slack_thread
+from squad.db import _to_session, create_session, update_session_slack_thread
 from squad.models import (
     EVENT_FAILED,
     EVENT_INTERVIEWING,
@@ -209,6 +211,54 @@ def format_pipeline_event(event: PipelineEvent) -> str:
             f"{stamp} · écoulé : {elapsed}"
         )
     return f"{event.type}: {stamp} · écoulé : {elapsed}"
+
+
+def find_session_by_thread(
+    channel_id: str,
+    thread_ts: str,
+    db_path: Path | None = None,
+) -> Session | None:
+    """Return the session whose Slack thread matches ``(channel_id, thread_ts)``.
+
+    Used by the ``file_shared`` handler to ignore drops that target a
+    thread Squad is not tracking. Returns ``None`` when no session
+    matches — the caller must silently skip those, never crash.
+    """
+    if not channel_id or not thread_ts:
+        return None
+    path = db_path or get_global_db_path()
+    db = Database(path)
+    if "sessions" not in db.table_names():
+        return None
+    rows = list(
+        db["sessions"].rows_where(
+            "slack_channel = ? AND slack_thread_ts = ?",
+            [channel_id, thread_ts],
+            limit=1,
+        )
+    )
+    if not rows:
+        return None
+    return _to_session(dict(rows[0]))
+
+
+def post_thread_message(client, session: Session, text: str) -> None:
+    """Send a plain text message in the session's Slack thread.
+
+    No-ops when the session has no Slack thread (CLI-only sessions).
+    Slack errors are logged and swallowed so callers can use this in
+    error paths without nesting another try/except.
+    """
+    if not session.slack_channel or not session.slack_thread_ts:
+        return
+    try:
+        client.chat_postMessage(
+            channel=session.slack_channel,
+            thread_ts=session.slack_thread_ts,
+            text=text,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to post thread message for session %s", session.id)
 
 
 def post_pipeline_event(event: PipelineEvent, session: Session, client) -> None:

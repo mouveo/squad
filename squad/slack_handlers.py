@@ -13,11 +13,14 @@ import logging
 from concurrent.futures import Executor
 from pathlib import Path
 
+from squad.attachment_service import AttachmentError, download_file, store_attachment
 from squad.pipeline import PipelineError, run_pipeline
 from squad.slack_service import (
     SlackResolutionError,
     create_session_from_slack,
+    find_session_by_thread,
     format_root_message,
+    post_thread_message,
     record_thread_ts,
 )
 
@@ -59,6 +62,15 @@ def register_handlers(
             client=client,
             db_path=db_path,
             executor=executor,
+            config=config,
+        )
+
+    @app.event("file_shared")
+    def _handle_file_shared(event, client):
+        handle_file_shared(
+            event=event,
+            client=client,
+            db_path=db_path,
             config=config,
         )
 
@@ -156,4 +168,120 @@ def _handle_new(
     respond(
         f"Session `{session.id[:8]}` créée — _{session.title}_. "
         f"Suivez la progression dans le thread."
+    )
+
+
+# ── file_shared (LOT 3) ───────────────────────────────────────────────────────
+
+
+def _resolve_thread_ts_from_shares(file_info: dict) -> tuple[str | None, str | None]:
+    """Pick the first ``(channel_id, thread_ts)`` pair from a file's ``shares``.
+
+    Slack reports shares under ``shares.public`` and ``shares.private``;
+    each entry is a ``{channel_id: [{ts, thread_ts?}, ...]}`` mapping.
+    Returns ``(None, None)`` when no thread context is found — the file
+    was dropped at top level of a channel and Squad cannot attach it.
+    """
+    shares = (file_info or {}).get("shares") or {}
+    for visibility in ("public", "private"):
+        bucket = shares.get(visibility) or {}
+        for channel_id, entries in bucket.items():
+            for entry in entries or []:
+                thread_ts = entry.get("thread_ts") or entry.get("ts")
+                if thread_ts:
+                    return channel_id, thread_ts
+    return None, None
+
+
+def handle_file_shared(
+    *,
+    event: dict,
+    client,
+    db_path: Path,
+    config: dict,
+) -> None:
+    """Process a Slack ``file_shared`` event.
+
+    Looks up the file via ``files.info``, resolves the originating
+    thread, attaches the file to the matching session if any. Drops
+    targeting unrelated threads are silently ignored. Validation /
+    network failures post a short error message in the session thread
+    so the PO knows the upload was rejected, then return without
+    raising.
+    """
+    file_id = (event or {}).get("file_id") or ((event or {}).get("file") or {}).get("id")
+    if not file_id:
+        logger.debug("file_shared event without file id: %r", event)
+        return
+
+    try:
+        info_response = client.files_info(file=file_id)
+    except Exception:
+        logger.exception("files.info failed for file %s", file_id)
+        return
+    file_info = (
+        info_response.get("file")
+        if isinstance(info_response, dict)
+        else getattr(info_response, "get", lambda _k: None)("file")
+    )
+    if not file_info:
+        return
+
+    channel_id, thread_ts = _resolve_thread_ts_from_shares(file_info)
+    if not channel_id or not thread_ts:
+        logger.debug("file %s has no thread share — ignoring", file_id)
+        return
+
+    session = find_session_by_thread(channel_id, thread_ts, db_path=db_path)
+    if session is None:
+        logger.debug(
+            "file %s shared in %s/%s but no Squad session matches", file_id, channel_id, thread_ts
+        )
+        return
+
+    filename = file_info.get("name") or file_id
+    size = int(file_info.get("size") or 0)
+    mime_type = file_info.get("mimetype")
+    download_url = file_info.get("url_private_download") or file_info.get("url_private")
+    bot_token = (config.get("slack") or {}).get("bot_token")
+
+    try:
+        from squad.attachment_service import validate_attachment
+
+        validate_attachment(
+            filename, size, session_id=session.id, config=config, db_path=db_path
+        )
+    except AttachmentError as exc:
+        post_thread_message(client, session, f":warning: Pièce jointe rejetée : {exc}")
+        return
+
+    if not download_url or not bot_token:
+        post_thread_message(
+            client, session, ":warning: Téléchargement Slack indisponible (URL ou token manquant)."
+        )
+        return
+
+    try:
+        content = download_file(download_url, bot_token)
+        meta = store_attachment(
+            session.id,
+            filename,
+            content,
+            mime_type=mime_type,
+            slack_file_id=file_id,
+            config=config,
+            db_path=db_path,
+        )
+    except AttachmentError as exc:
+        post_thread_message(client, session, f":warning: Pièce jointe rejetée : {exc}")
+        return
+    except Exception as exc:
+        logger.exception("Unexpected attachment error for file %s", file_id)
+        post_thread_message(client, session, f":warning: Erreur interne pendant l'attachement : {exc}")
+        return
+
+    post_thread_message(
+        client,
+        session,
+        f":paperclip: Fichier `{meta.filename}` attaché ({meta.size_bytes} octets).",
     )

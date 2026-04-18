@@ -38,6 +38,7 @@ from squad.models import (
     RESEARCH_DEPTH_LIGHT,
     RESEARCH_DEPTH_NORMAL,
     RESEARCH_DEPTHS,
+    AttachmentMeta,
     GeneratedPlan,
     PhaseOutput,
     PipelineEvent,
@@ -426,3 +427,47 @@ class TestPipelineEvent:
             failure_reason="critical agent pm failed",
         )
         assert e.failure_reason == "critical agent pm failed"
+
+
+# ── AttachmentMeta (LOT 3 — Plan 4) ───────────────────────────────────────────
+
+
+class TestAttachmentMeta:
+    def test_extension_inferred_from_filename(self):
+        m = AttachmentMeta(
+            session_id="s1",
+            filename="brief.md",
+            path="/tmp/attachments/brief.md",
+            size_bytes=120,
+        )
+        assert m.extension == "md"
+
+    def test_explicit_extension_preserved(self):
+        m = AttachmentMeta(
+            session_id="s1",
+            filename="weird",
+            path="/tmp/weird",
+            size_bytes=10,
+            extension="txt",
+        )
+        assert m.extension == "txt"
+
+    def test_extension_lowercased(self):
+        m = AttachmentMeta(
+            session_id="s1",
+            filename="REPORT.PDF",
+            path="/tmp/REPORT.PDF",
+            size_bytes=2048,
+        )
+        assert m.extension == "pdf"
+
+    def test_optional_fields(self):
+        m = AttachmentMeta(
+            session_id="s1",
+            filename="brief.md",
+            path="/tmp/brief.md",
+            size_bytes=10,
+        )
+        assert m.mime_type is None
+        assert m.slack_file_id is None
+        assert m.uploaded_at is not None

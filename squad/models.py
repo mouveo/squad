@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
+from pathlib import Path
 
 from squad.constants import (
     MODE_APPROVAL,
@@ -138,6 +139,33 @@ class GeneratedPlan:
     content: str
     forge_status: str | None = None
     created_at: datetime = field(default_factory=datetime.utcnow)
+
+
+# ── Slack attachments (Plan 4 — LOT 3) ────────────────────────────────────────
+
+
+@dataclass
+class AttachmentMeta:
+    """Metadata for a file attached to a Slack session thread.
+
+    The actual bytes live in ``{workspace}/attachments/{filename}``;
+    this dataclass carries only the descriptive fields used by the
+    context builder, the listing API and (later) the audit logs.
+    ``mime_type`` is whatever Slack reports — Squad does not infer it.
+    """
+
+    session_id: str
+    filename: str
+    path: str
+    size_bytes: int
+    mime_type: str | None = None
+    extension: str = ""
+    slack_file_id: str | None = None
+    uploaded_at: datetime = field(default_factory=datetime.utcnow)
+
+    def __post_init__(self) -> None:
+        if not self.extension:
+            self.extension = Path(self.filename).suffix.lstrip(".").lower()
 
 
 # ── Pipeline events (Plan 4 — LOT 2) ──────────────────────────────────────────

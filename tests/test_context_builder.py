@@ -596,3 +596,136 @@ class TestBuildCumulativeContextAttemptAware:
         assert "Concurrents" in ctx
         # Budget cap respected
         assert len(ctx) < _TARGET_CHARS
+
+
+# ── attachments section (LOT 3 — Plan 4) ──────────────────────────────────────
+
+
+from squad.context_builder import format_attachments  # noqa: E402
+from squad.models import AttachmentMeta as _AttachmentMeta  # noqa: E402
+
+
+def _attach(filename, *, size=100, mime=None, ext=None) -> _AttachmentMeta:
+    return _AttachmentMeta(
+        session_id="sess-test",
+        filename=filename,
+        path=f"/tmp/attachments/{filename}",
+        size_bytes=size,
+        mime_type=mime,
+        extension=ext or "",
+    )
+
+
+class TestFormatAttachments:
+    def test_returns_empty_when_no_attachments(self):
+        assert format_attachments([]) == ""
+
+    def test_lists_each_attachment(self):
+        out = format_attachments(
+            [
+                _attach("brief.md", size=120),
+                _attach("photo.png", size=2048, mime="image/png"),
+            ]
+        )
+        assert "## Fichiers joints" in out
+        assert "`brief.md`" in out
+        assert "`photo.png`" in out
+
+    def test_inlines_text_files_only(self, tmp_path):
+        # Real file on disk so the inliner can read it
+        p = tmp_path / "brief.md"
+        p.write_text("# brief\n\nimportant detail", encoding="utf-8")
+        out = format_attachments(
+            [
+                _AttachmentMeta(
+                    session_id="s",
+                    filename="brief.md",
+                    path=str(p),
+                    size_bytes=p.stat().st_size,
+                ),
+                _attach("photo.png", size=2048, mime="image/png"),
+            ]
+        )
+        assert "important detail" in out
+        # Binary file is referenced but never inlined
+        assert "photo.png" in out
+        assert "image/png" in out
+
+    def test_truncates_large_text_attachment(self, tmp_path):
+        p = tmp_path / "huge.md"
+        p.write_text("X" * 50_000, encoding="utf-8")
+        out = format_attachments(
+            [
+                _AttachmentMeta(
+                    session_id="s",
+                    filename="huge.md",
+                    path=str(p),
+                    size_bytes=p.stat().st_size,
+                )
+            ]
+        )
+        assert "Tronqué" in out
+
+    def test_binary_extensions_not_inlined(self, tmp_path):
+        p = tmp_path / "doc.pdf"
+        p.write_bytes(b"%PDF-1.4\n%fake")
+        out = format_attachments(
+            [
+                _AttachmentMeta(
+                    session_id="s",
+                    filename="doc.pdf",
+                    path=str(p),
+                    size_bytes=p.stat().st_size,
+                    mime_type="application/pdf",
+                )
+            ]
+        )
+        # Only listed, never inlined
+        assert "doc.pdf" in out
+        assert "%PDF" not in out
+
+
+class TestBuildCumulativeContextWithAttachments:
+    def test_attachments_section_appears_after_qa(
+        self,
+        patch_get_session,
+        patch_get_context,
+        patch_list_phase_outputs,
+        tmp_path,
+    ):
+        attached = tmp_path / "brief.md"
+        attached.write_text("Persona: SMB ops manager", encoding="utf-8")
+
+        meta = _AttachmentMeta(
+            session_id="sess-test",
+            filename="brief.md",
+            path=str(attached),
+            size_bytes=attached.stat().st_size,
+        )
+        with (
+            patch(
+                "squad.context_builder._get_answered_questions",
+                return_value=[
+                    {"agent": "pm", "phase": "cadrage", "question": "Q?", "answer": "A"}
+                ],
+            ),
+            patch("squad.context_builder.list_attachments", return_value=[meta]),
+        ):
+            ctx = build_cumulative_context("sess-test", PHASE_CADRAGE)
+
+        assert "## Q&A" in ctx
+        assert "## Fichiers joints" in ctx
+        # Attachments come after Q&A
+        assert ctx.index("## Q&A") < ctx.index("## Fichiers joints")
+        assert "Persona: SMB ops manager" in ctx
+
+    def test_no_attachments_section_when_none(
+        self,
+        patch_get_session,
+        patch_get_context,
+        patch_answered_questions,
+        patch_list_phase_outputs,
+    ):
+        with patch("squad.context_builder.list_attachments", return_value=[]):
+            ctx = build_cumulative_context("sess-test", PHASE_CADRAGE)
+        assert "## Fichiers joints" not in ctx

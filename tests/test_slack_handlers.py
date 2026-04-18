@@ -1,7 +1,7 @@
 """Tests for squad.slack_handlers — /squad new command dispatch."""
 
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -177,3 +177,158 @@ class TestSquadNew:
         fn, args, _ = executor.submitted[0]
         session_id = list_active_sessions(db_path=db_path)[0].id
         assert args[0] == session_id
+
+
+# ── file_shared handler (LOT 3) ───────────────────────────────────────────────
+
+
+from pathlib import Path as _Path  # noqa: E402
+
+from squad.db import update_session_slack_thread  # noqa: E402
+from squad.slack_handlers import handle_file_shared  # noqa: E402
+
+
+def _slack_session(db_path, config, executor, client):
+    """Create a Squad session via /squad new and capture the resulting session row."""
+    respond = MagicMock()
+    handle_squad_command(
+        command=_command("new Build CRM"),
+        respond=respond,
+        client=client,
+        db_path=db_path,
+        executor=executor,
+        config=config,
+    )
+    return list_active_sessions(db_path=db_path)[0]
+
+
+def _file_info(file_id, *, name, size, channel, thread_ts, mime="text/markdown"):
+    return {
+        "ok": True,
+        "file": {
+            "id": file_id,
+            "name": name,
+            "size": size,
+            "mimetype": mime,
+            "url_private_download": "https://files.slack.com/x",
+            "shares": {
+                "public": {channel: [{"ts": thread_ts, "thread_ts": thread_ts}]},
+            },
+        },
+    }
+
+
+class TestFileShared:
+    def _config_with_token(self, base_config):
+        cfg = dict(base_config)
+        cfg["slack"] = {**base_config["slack"], "bot_token": "xoxb-test"}
+        return cfg
+
+    def test_attaches_file_to_session(self, db_path, config, executor, client, tmp_path):
+        cfg = self._config_with_token(config)
+        session = _slack_session(db_path, cfg, executor, client)
+        # Simulate Slack thread ts being known on the session
+        update_session_slack_thread(session.id, "1700000000.000100", db_path=db_path)
+
+        client.files_info.return_value = _file_info(
+            "F123", name="brief.md", size=12, channel="C999", thread_ts="1700000000.000100"
+        )
+        with patch(
+            "squad.slack_handlers.download_file", return_value=b"# brief body"
+        ) as m_download:
+            handle_file_shared(
+                event={"file_id": "F123"},
+                client=client,
+                db_path=db_path,
+                config=cfg,
+            )
+
+        m_download.assert_called_once()
+        attachments = _Path(session.workspace_path) / "attachments"
+        assert (attachments / "brief.md").read_bytes() == b"# brief body"
+        # Confirmation posted in the thread
+        post_calls = [
+            c for c in client.chat_postMessage.call_args_list
+            if c.kwargs.get("thread_ts") == "1700000000.000100"
+        ]
+        assert any("attaché" in c.kwargs.get("text", "") for c in post_calls)
+
+    def test_unrelated_thread_is_ignored(self, db_path, config, executor, client):
+        cfg = self._config_with_token(config)
+        session = _slack_session(db_path, cfg, executor, client)
+        update_session_slack_thread(session.id, "1700000000.000100", db_path=db_path)
+
+        client.files_info.return_value = _file_info(
+            "F123", name="brief.md", size=12, channel="C999", thread_ts="9999.000000"
+        )
+        with patch("squad.slack_handlers.download_file") as m_download:
+            handle_file_shared(
+                event={"file_id": "F123"}, client=client, db_path=db_path, config=cfg
+            )
+        m_download.assert_not_called()
+
+    def test_oversized_file_posts_error_no_storage(
+        self, db_path, config, executor, client
+    ):
+        from squad.attachment_service import DEFAULT_MAX_FILE_BYTES
+
+        cfg = self._config_with_token(config)
+        session = _slack_session(db_path, cfg, executor, client)
+        update_session_slack_thread(session.id, "1700000000.000100", db_path=db_path)
+
+        client.files_info.return_value = _file_info(
+            "F123",
+            name="huge.md",
+            size=DEFAULT_MAX_FILE_BYTES + 1,
+            channel="C999",
+            thread_ts="1700000000.000100",
+        )
+        with patch("squad.slack_handlers.download_file") as m_download:
+            handle_file_shared(
+                event={"file_id": "F123"}, client=client, db_path=db_path, config=cfg
+            )
+        m_download.assert_not_called()
+        attachments = _Path(session.workspace_path) / "attachments"
+        assert list(attachments.iterdir()) == []
+        # Error posted in thread
+        warning = [
+            c for c in client.chat_postMessage.call_args_list
+            if "rejetée" in c.kwargs.get("text", "")
+        ]
+        assert warning
+
+    def test_disallowed_extension_posts_error_no_storage(
+        self, db_path, config, executor, client
+    ):
+        cfg = self._config_with_token(config)
+        session = _slack_session(db_path, cfg, executor, client)
+        update_session_slack_thread(session.id, "1700000000.000100", db_path=db_path)
+
+        client.files_info.return_value = _file_info(
+            "F123",
+            name="payload.exe",
+            size=100,
+            channel="C999",
+            thread_ts="1700000000.000100",
+        )
+        with patch("squad.slack_handlers.download_file") as m_download:
+            handle_file_shared(
+                event={"file_id": "F123"}, client=client, db_path=db_path, config=cfg
+            )
+        m_download.assert_not_called()
+        attachments = _Path(session.workspace_path) / "attachments"
+        assert list(attachments.iterdir()) == []
+
+    def test_no_thread_share_silently_ignored(self, db_path, config, executor, client):
+        cfg = self._config_with_token(config)
+        session = _slack_session(db_path, cfg, executor, client)
+        update_session_slack_thread(session.id, "1700000000.000100", db_path=db_path)
+
+        client.files_info.return_value = {
+            "file": {"id": "F123", "name": "brief.md", "size": 10, "shares": {}}
+        }
+        with patch("squad.slack_handlers.download_file") as m_download:
+            handle_file_shared(
+                event={"file_id": "F123"}, client=client, db_path=db_path, config=cfg
+            )
+        m_download.assert_not_called()
