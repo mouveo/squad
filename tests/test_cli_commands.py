@@ -620,6 +620,72 @@ class TestInitCommand:
 # ── squad serve (LOT 1 — Plan 4) ──────────────────────────────────────────────
 
 
+class TestDashboardCommand:
+    def test_missing_streamlit_fails_with_clear_error(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Force `import streamlit` to fail regardless of whether the extra
+        # is actually installed in the test environment.
+        import sys as _sys
+
+        monkeypatch.setitem(_sys.modules, "streamlit", None)
+        result = runner.invoke(cli, ["dashboard"], catch_exceptions=False)
+        assert result.exit_code != 0
+        assert "Dashboard extra not installed" in result.output
+        assert 'pip install -e ".[dashboard]"' in result.output
+
+    def test_launch_uses_streamlit_subprocess_with_defaults(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ):
+        import sys as _sys
+        import types
+
+        fake_streamlit = types.ModuleType("streamlit")
+        monkeypatch.setitem(_sys.modules, "streamlit", fake_streamlit)
+
+        captured: dict = {}
+
+        def _fake_run(cmd, check=False):
+            captured["cmd"] = cmd
+            return None
+
+        with patch("squad.cli.subprocess.run", side_effect=_fake_run):
+            result = runner.invoke(cli, ["dashboard"], catch_exceptions=False)
+        assert result.exit_code == 0
+        cmd = captured["cmd"]
+        assert cmd[0] == _sys.executable
+        assert cmd[1:4] == ["-m", "streamlit", "run"]
+        assert cmd[4].endswith("squad/dashboard/app.py")
+        assert "--server.address" in cmd
+        assert cmd[cmd.index("--server.address") + 1] == "127.0.0.1"
+        assert "--server.port" in cmd
+        assert cmd[cmd.index("--server.port") + 1] == "8501"
+
+    def test_launch_honors_custom_host_and_port(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ):
+        import sys as _sys
+        import types
+
+        monkeypatch.setitem(_sys.modules, "streamlit", types.ModuleType("streamlit"))
+
+        captured: dict = {}
+
+        def _fake_run(cmd, check=False):
+            captured["cmd"] = cmd
+            return None
+
+        with patch("squad.cli.subprocess.run", side_effect=_fake_run):
+            result = runner.invoke(
+                cli, ["dashboard", "--host", "0.0.0.0", "--port", "9999"],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        cmd = captured["cmd"]
+        assert cmd[cmd.index("--server.address") + 1] == "0.0.0.0"
+        assert cmd[cmd.index("--server.port") + 1] == "9999"
+
+
 class TestServeCommand:
     def test_missing_bot_token_fails_with_clear_error(
         self, runner: CliRunner, db_path: Path, monkeypatch: pytest.MonkeyPatch

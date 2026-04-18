@@ -7,7 +7,7 @@
 
 Squad est un orchestrateur multi-agents produit. Il prend une idée en entrée, la fait instruire par une équipe d'agents IA spécialisés (PM, UX, Architect, Security, etc.), et produit des plans exécutables par Forge.
 
-Squad est un outil CLI Python destiné à être utilisé par un product owner technique. Il n'a pas d'interface web (Forge a déjà un dashboard). Il communique avec l'utilisateur via le terminal et Slack.
+Squad est un outil CLI Python destiné à être utilisé par un product owner technique. Il communique avec l'utilisateur via le terminal et Slack, et propose un dashboard local optionnel (Streamlit, lancé par `squad dashboard`) pour consulter les sessions et piloter la review des plans — pas d'interface web distante ni de serveur applicatif partagé.
 
 ## Stack
 

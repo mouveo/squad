@@ -1,5 +1,7 @@
 """Squad CLI entry point."""
 
+import subprocess
+import sys
 import uuid
 from pathlib import Path
 
@@ -606,6 +608,48 @@ def serve(
         )
     except SlackConfigError as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+@cli.command()
+@click.option(
+    "--host",
+    default="127.0.0.1",
+    show_default=True,
+    help="Network interface Streamlit binds to (local only by default).",
+)
+@click.option(
+    "--port",
+    default=8501,
+    show_default=True,
+    type=int,
+    help="TCP port the dashboard listens on.",
+)
+def dashboard(host: str, port: int) -> None:
+    """Launch the local Streamlit dashboard (optional `dashboard` extra)."""
+    try:
+        import streamlit  # noqa: F401
+    except ImportError as exc:
+        raise click.ClickException(
+            'Dashboard extra not installed — run pip install -e ".[dashboard]" first.'
+        ) from exc
+
+    app_path = Path(__file__).parent / "dashboard" / "app.py"
+    cmd = [
+        sys.executable,
+        "-m",
+        "streamlit",
+        "run",
+        str(app_path),
+        "--server.address",
+        host,
+        "--server.port",
+        str(port),
+        "--server.headless",
+        "true",
+        "--browser.gatherUsageStats",
+        "false",
+    ]
+    subprocess.run(cmd, check=False)
 
 
 @cli.command()

@@ -8,6 +8,11 @@ AI Lead) qui instruisent un sujet produit en 6 phases — cadrage, état
 des lieux, benchmark, conception, challenge, synthèse — puis
 matérialisent la décision en plans Forge prêts à exécuter.
 
+Le pilotage se fait en ligne de commande et via Slack. Un dashboard
+local optionnel (Streamlit, lancé par `squad dashboard`) permet aussi
+de consulter les sessions et de piloter la review des plans depuis le
+navigateur — purement local, sans API distante ni authentification.
+
 ## Quick start
 
 ```bash
@@ -58,6 +63,7 @@ Prérequis :
 | `squad status [session_id]`                   | Détail d'une session ou liste des sessions actives. |
 | `squad history [--project <p>] [--limit N]`   | Historique des sessions terminées. |
 | `squad init [--project <p>] [--force]`        | Écrit un YAML de config par défaut (global ou projet). |
+| `squad dashboard [--host …] [--port …]`       | Lance le dashboard Streamlit local (extra `dashboard`). |
 | `squad version`                               | Version installée. |
 
 Les commandes asynchrones (`start` + `answer` + `resume` + `review` +
