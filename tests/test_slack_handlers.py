@@ -253,7 +253,16 @@ class TestFileShared:
         ]
         assert any("attaché" in c.kwargs.get("text", "") for c in post_calls)
 
-    def test_unrelated_thread_is_ignored(self, db_path, config, executor, client):
+    def test_unrelated_thread_falls_back_to_recent_session(
+        self, db_path, config, executor, client
+    ):
+        """When a file carries a thread_ts that doesn't match any session
+        but a recent session exists on the same channel, the handler now
+        falls back to that session. This covers the case of a file dropped
+        at main channel level alongside ``/squad new`` — Slack tags it
+        with the message ts (not a real thread_ts) and no session row has
+        that as ``slack_thread_ts`` so the thread match misses.
+        """
         cfg = self._config_with_token(config)
         session = _slack_session(db_path, cfg, executor, client)
         update_session_slack_thread(session.id, "1700000000.000100", db_path=db_path)
@@ -261,11 +270,17 @@ class TestFileShared:
         client.files_info.return_value = _file_info(
             "F123", name="brief.md", size=12, channel="C999", thread_ts="9999.000000"
         )
-        with patch("squad.slack_handlers.download_file") as m_download:
+        with patch(
+            "squad.slack_handlers.download_file", return_value=b"# brief\n\nhi"
+        ) as m_download:
             handle_file_shared(
                 event={"file_id": "F123"}, client=client, db_path=db_path, config=cfg
             )
-        m_download.assert_not_called()
+        m_download.assert_called_once()
+        # File should land in the recent session's attachments/ folder.
+        attachments = _Path(session.workspace_path) / "attachments"
+        stored = list(attachments.iterdir())
+        assert stored, "file should be auto-attached to the recent session"
 
     def test_oversized_file_posts_error_no_storage(
         self, db_path, config, executor, client

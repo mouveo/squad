@@ -409,26 +409,45 @@ def handle_file_shared(
         )
         session = find_session_by_thread(channel_id, thread_ts, db_path=db_path)
         if session is None:
-            logger.warning(
-                "file %s shared in %s/%s but no Squad session matches",
-                file_id,
-                channel_id,
-                thread_ts,
-            )
-            try:
-                client.chat_postMessage(
-                    channel=channel_id,
-                    thread_ts=thread_ts,
-                    text=(
-                        ":warning: Aucune session Squad active ne correspond à ce thread — "
-                        "le fichier ne sera pas injecté dans le contexte des agents. "
-                        "Lancez d'abord `/squad new <idée>` puis déposez le fichier "
-                        "dans *ce* thread."
-                    ),
+            # The resolved "thread_ts" might actually be the message ts
+            # of a file dropped in the main channel (no real thread yet).
+            # In that case the shares payload carries ts=<file_message_ts>
+            # which never matches a session.slack_thread_ts. Try the
+            # recency fallback before giving up — same logic as the
+            # no-thread-share branch below.
+            fallback = find_recent_session_by_channel(channel_id, db_path=db_path)
+            if fallback is not None:
+                logger.info(
+                    "file %s no thread match but auto-attached to recent "
+                    "session %s on channel %s (thread_ts=%s was a message ts)",
+                    file_id,
+                    fallback.id,
+                    channel_id,
+                    thread_ts,
                 )
-            except Exception:
-                logger.exception("Could not post no-match hint")
-            return
+                session = fallback
+            else:
+                logger.warning(
+                    "file %s shared in %s/%s but no Squad session matches "
+                    "(neither by thread nor by channel recency)",
+                    file_id,
+                    channel_id,
+                    thread_ts,
+                )
+                try:
+                    client.chat_postMessage(
+                        channel=channel_id,
+                        thread_ts=thread_ts,
+                        text=(
+                            ":warning: Aucune session Squad active ne correspond — "
+                            "le fichier ne sera pas injecté dans le contexte des agents. "
+                            "Lancez d'abord `/squad new <idée>` puis déposez le fichier "
+                            "dans le thread qui apparaît."
+                        ),
+                    )
+                except Exception:
+                    logger.exception("Could not post no-match hint")
+                return
     else:
         # No thread share. Most common cause: the file was dropped in
         # the main channel together with `/squad new`, before the bot
