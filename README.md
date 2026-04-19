@@ -143,6 +143,14 @@ Voir `docs/ARCHITECTURE.md` pour le contrat entre Squad et Forge.
 
 - `CLAUDE.md` — instructions pour Claude Code travaillant sur Squad.
 - `AGENTS.md` — rôles internes (Architecte / Dev / Testeur / Rédacteur).
+- `docs/FOR_AI_COLLABORATORS.md` — **lecture obligatoire pour toute IA
+  invitée dans un autre projet à qui l'utilisateur demande un prompt ou
+  un document pour Squad.** Anatomie d'un bon brief, formats acceptés
+  (pièces jointes incluses), erreurs typiques à ne pas faire.
+- `docs/SITAVISTA_TEST.md` — procédure end-to-end reproductible avec un
+  exemple complet (prompt + deepsearch + checkpoints).
+- `docs/TROUBLESHOOTING.md` — journal des bugs observés en conditions
+  réelles et leurs contre-mesures.
 - `docs/AGENTS.md` — les 10 agents produit que Squad orchestre.
 - `docs/ARCHITECTURE.md` — pipeline, DB, recovery, benchmark, génération.
 - `docs/TUNING.md` — décisions d'ajustement issues des validations manuelles.
