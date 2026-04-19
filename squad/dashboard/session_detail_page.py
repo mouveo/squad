@@ -154,25 +154,35 @@ def _render_pending_questions(detail: SessionDetail) -> None:
 
 
 def render_session_detail_page(session_id: str | None) -> None:
-    """Render the session detail view. Redirects when the id is missing."""
+    """Render the session detail view. Redirects when the id is missing.
+
+    The phase timeline + angles + attachments sections auto-refresh every
+    5 seconds via ``st.fragment`` so phase transitions and new attachments
+    appear without a manual rerun. The static header is rendered outside
+    the fragment so it doesn't flicker on each tick.
+    """
     if not session_id:
         st.error("Aucun identifiant de session fourni.")
         _back_to_list_button()
         return
 
-    detail = get_session_detail(session_id)
-    if detail is None:
-        st.error(f"Session `{session_id}` introuvable.")
-        _back_to_list_button()
-        return
+    @st.fragment(run_every="5s")
+    def _refreshing_body():
+        detail = get_session_detail(session_id)
+        if detail is None:
+            st.error(f"Session `{session_id}` introuvable.")
+            _back_to_list_button()
+            return
 
-    _render_header(detail)
-    _render_idea_and_context(detail)
+        _render_header(detail)
+        _render_idea_and_context(detail)
 
-    st.subheader("🧵 Timeline des phases")
-    for phase in detail.phases:
-        _render_phase(phase)
+        st.subheader("🧵 Timeline des phases")
+        for phase in detail.phases:
+            _render_phase(phase)
 
-    _render_angles(detail)
-    _render_attachments(detail)
-    _render_pending_questions(detail)
+        _render_angles(detail)
+        _render_attachments(detail)
+        _render_pending_questions(detail)
+
+    _refreshing_body()

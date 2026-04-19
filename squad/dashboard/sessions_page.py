@@ -39,7 +39,12 @@ def _phase_cell(row: SessionRow) -> str:
 
 
 def render_sessions_page() -> None:
-    """Render the session list with filters and navigation hooks."""
+    """Render the session list with filters and navigation hooks.
+
+    The session table auto-refreshes every 5 seconds via ``st.fragment``
+    so phase transitions and newly created sessions appear without a
+    manual refresh. Filters stay persistent thanks to Streamlit state.
+    """
     st.header("Sessions")
 
     with st.sidebar:
@@ -72,47 +77,50 @@ def render_sessions_page() -> None:
             index=1,
         )
 
-    rows = list_sessions_for_dashboard(
-        status=selected_statuses or None,
-        project_path=None,  # filter client-side via substring below
-        sort=sort_choice,
-    )
+    @st.fragment(run_every="5s")
+    def _refreshing_table():
+        rows = list_sessions_for_dashboard(
+            status=selected_statuses or None,
+            project_path=None,  # filter client-side via substring below
+            sort=sort_choice,
+        )
 
-    if only_active:
-        rows = [r for r in rows if r.is_active]
-    if project_filter:
-        rows = [r for r in rows if project_filter.lower() in r.project_path.lower()]
+        if only_active:
+            rows = [r for r in rows if r.is_active]
+        if project_filter:
+            rows = [
+                r for r in rows if project_filter.lower() in r.project_path.lower()
+            ]
 
-    st.caption(
-        f"{len(rows)} session(s) · dernière MAJ "
-        f"{datetime.utcnow().strftime('%H:%M:%S')} UTC"
-    )
+        st.caption(
+            f"{len(rows)} session(s) · auto-refresh 5s · MAJ "
+            f"{datetime.utcnow().strftime('%H:%M:%S')} UTC"
+        )
 
-    if not rows:
-        st.info("Aucune session ne correspond aux filtres.")
-        return
+        if not rows:
+            st.info("Aucune session ne correspond aux filtres.")
+            return
 
-    # Render as a Streamlit data editor with clickable short IDs.
-    # Streamlit does not natively support cell-click actions, so we emit
-    # a grid of rows with a dedicated "Ouvrir" button per row.
-    header_cols = st.columns([2, 5, 3, 3, 3, 2, 2])
-    header_cols[0].markdown("**ID**")
-    header_cols[1].markdown("**Titre**")
-    header_cols[2].markdown("**Projet**")
-    header_cols[3].markdown("**Statut**")
-    header_cols[4].markdown("**Phase**")
-    header_cols[5].markdown("**Âge**")
-    header_cols[6].markdown("**Actions**")
+        header_cols = st.columns([2, 5, 3, 3, 3, 2, 2])
+        header_cols[0].markdown("**ID**")
+        header_cols[1].markdown("**Titre**")
+        header_cols[2].markdown("**Projet**")
+        header_cols[3].markdown("**Statut**")
+        header_cols[4].markdown("**Phase**")
+        header_cols[5].markdown("**Âge**")
+        header_cols[6].markdown("**Actions**")
 
-    for row in rows:
-        cols = st.columns([2, 5, 3, 3, 3, 2, 2])
-        cols[0].code(row.id[:8], language=None)
-        cols[1].write(row.title)
-        cols[2].write(row.project_path.split("/")[-1] or row.project_path)
-        cols[3].write(_status_cell(row))
-        cols[4].write(_phase_cell(row))
-        cols[5].write(row.age_fr)
-        if cols[6].button("Ouvrir", key=f"open_{row.id}"):
-            st.query_params["page"] = "session"
-            st.query_params["id"] = row.id
-            st.rerun()
+        for row in rows:
+            cols = st.columns([2, 5, 3, 3, 3, 2, 2])
+            cols[0].code(row.id[:8], language=None)
+            cols[1].write(row.title)
+            cols[2].write(row.project_path.split("/")[-1] or row.project_path)
+            cols[3].write(_status_cell(row))
+            cols[4].write(_phase_cell(row))
+            cols[5].write(row.age_fr)
+            if cols[6].button("Ouvrir", key=f"open_{row.id}"):
+                st.query_params["page"] = "session"
+                st.query_params["id"] = row.id
+                st.rerun()
+
+    _refreshing_table()
