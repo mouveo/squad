@@ -78,6 +78,34 @@ pipelines avant de sortir. Le heartbeat expose `pipelines running: N`.
   failure_reason='orphaned' WHERE id='<uuid>';"` pour annuler puis
   repartir sur une nouvelle session.
 
+### Upload du `.md` du plan absent dans Slack → `missing_scope: files:write`
+
+**Symptôme** : quand la review est postée dans le thread, le résumé
+apparaît mais le fichier `.md` complet n'est pas attaché. Dans
+`serve.log` :
+```
+slack_sdk.errors.SlackApiError: {'ok': False, 'error': 'missing_scope',
+  'needed': 'files:write', 'provided': 'commands,chat:write,...,files:read,...'}
+```
+
+**Cause** : l'app Slack créée au LOT 1 du plan 4 a bien `files:read`
+(pour télécharger les attachments utilisateur) mais pas `files:write`
+(pour uploader des fichiers côté bot).
+
+**Fix côté config Slack** (une seule fois) :
+
+1. Ouvrir https://api.slack.com/apps/<app_id>/oauth
+2. Dans "Bot Token Scopes", cliquer "Add an OAuth Scope"
+3. Ajouter `files:write`
+4. En haut de la page, cliquer "Reinstall to Workspace" — le token `xoxb-` reste le même mais les nouveaux scopes sont activés
+5. Pas besoin de redémarrer `squad serve` — les scopes sont résolus à chaque appel Slack API
+
+Bot Token Scopes complets attendus :
+```
+commands, chat:write, files:read, files:write,
+app_mentions:read, im:read, im:write
+```
+
 ### Authentification Claude CLI 401 intermittent
 
 **Symptôme** : Forge ou Squad rate un appel Claude avec

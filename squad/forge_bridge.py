@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 # Name of the Forge CLI on PATH
 FORGE_CMD = "forge"
 # Default timeout for forge subprocess calls
-_FORGE_TIMEOUT = 60
+_FORGE_TIMEOUT = 300
 
 
 class ForgeUnavailable(RuntimeError):
@@ -102,8 +102,18 @@ def get_queue_status(project_path: str) -> QueueStatus:
 
 
 def add_plan_to_queue(project_path: str, plan_file: Path) -> None:
-    """Add a single plan file to the project's Forge queue."""
-    result = _run_forge(["queue", "add", project_path, str(plan_file)])
+    """Add a single plan file to the project's Forge queue.
+
+    Passes ``--no-auto-apply`` so the Codex auto-review stage is skipped
+    and the plan lands directly in ``pending``. Squad plans have already
+    been through the 10-agent pipeline + the ``review`` human gate (CLI
+    approve, Slack button or dashboard), so a second automated review
+    would be redundant and — when it happens without the runner being
+    actively polling — leaves the item stuck in ``reviewing``.
+    """
+    result = _run_forge(
+        ["queue", "add", project_path, str(plan_file), "--no-auto-apply"]
+    )
     if result.returncode != 0:
         raise ForgeUnavailable(
             f"forge queue add failed for {plan_file.name}: {(result.stderr or result.stdout)[:200]}"
