@@ -99,11 +99,28 @@ class TestGetQueueStatus:
             patch("squad.forge_bridge.is_forge_available", return_value=True),
             patch(
                 "squad.forge_bridge._run_forge",
-                return_value=_completed("currently running plan-1", 0),
+                return_value=_completed("1  executing  my-plan.md", 0),
             ),
         ):
             status = get_queue_status("/tmp/p")
         assert status.busy is True
+
+    def test_invokes_queue_list_subcommand(self):
+        """Regression: ``forge queue status`` was removed in favour of
+        ``list`` when Forge reorganised its queue CLI. The adapter must
+        call ``list`` or the caller surfaces an "Unknown queue sub-command"
+        error on every session submission.
+        """
+        with (
+            patch("squad.forge_bridge.is_forge_available", return_value=True),
+            patch(
+                "squad.forge_bridge._run_forge",
+                return_value=_completed("Queue is empty.", 0),
+            ) as mock_run,
+        ):
+            get_queue_status("/tmp/p")
+        args = mock_run.call_args.args[0]
+        assert args[:2] == ["queue", "list"], f"unexpected forge args: {args}"
 
     def test_error_return_code_reports_unavailable(self):
         with (

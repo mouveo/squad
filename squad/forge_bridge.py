@@ -76,22 +76,28 @@ def get_queue_status(project_path: str) -> QueueStatus:
 
     A missing Forge CLI is reported as unavailable rather than raised, so
     callers can choose to fall back gracefully. The ``busy`` flag is a
-    conservative heuristic on the output of ``forge queue status``.
+    conservative heuristic on the output of ``forge queue list`` (the
+    CLI used to expose ``queue status`` in earlier versions; ``list`` is
+    the supported subcommand since the Forge CLI reorganised its queue
+    commands to {add, list, run, clear, rollback}).
     """
     if not is_forge_available():
         return QueueStatus(available=False, busy=False, reason="forge CLI not installed")
     try:
-        result = _run_forge(["queue", "status", project_path])
+        result = _run_forge(["queue", "list", project_path])
     except ForgeUnavailable as exc:
         return QueueStatus(available=False, busy=False, reason=str(exc))
     if result.returncode != 0:
         return QueueStatus(
             available=False,
             busy=False,
-            reason=(result.stderr or result.stdout or "forge queue status failed")[:200],
+            reason=(result.stderr or result.stdout or "forge queue list failed")[:200],
         )
     stdout_low = result.stdout.lower()
-    busy = "running" in stdout_low or "in progress" in stdout_low or "busy" in stdout_low
+    # ``forge queue list`` prints a table where the ``Status`` column holds
+    # one of pending / reviewing / executing / passed / failed. The queue
+    # is considered busy whenever an item is still in flight.
+    busy = any(marker in stdout_low for marker in ("executing", "reviewing", "pending"))
     return QueueStatus(available=True, busy=busy)
 
 
