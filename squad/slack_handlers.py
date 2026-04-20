@@ -36,6 +36,7 @@ from squad.forge_bridge import (
 )
 from squad.models import EVENT_INTERVIEWING, EVENT_REVIEW, PipelineEvent, Session
 from squad.pipeline import PipelineError, resume_pipeline, run_pipeline
+from squad.plans_autoscan import autoscan_and_import_plans
 from squad.review_service import reject_session
 from squad.slack_service import (
     ANGLE_PICK_ACTION_ID,
@@ -312,6 +313,35 @@ def _handle_new(
             record_thread_ts(session.id, thread_ts, db_path=db_path)
     except Exception:
         logger.exception("Failed to post root thread message for session %s", session.id)
+
+    # Auto-scan local `plans/<subject>/` and import eligible files before the
+    # pipeline starts so the cumulative context already sees them. Failures
+    # here must never prevent the pipeline from running.
+    try:
+        scan_result = autoscan_and_import_plans(session, idea, db_path=db_path)
+    except Exception:
+        logger.exception("plans auto-scan crashed for session %s", session.id)
+        scan_result = None
+
+    if (
+        scan_result is not None
+        and scan_result.folder is not None
+        and (scan_result.imported_count + scan_result.rejected_count + scan_result.ignored_count) > 0
+    ):
+        folder_display = scan_result.folder.name
+        summary = (
+            f":open_file_folder: {scan_result.imported_count} fichier(s) "
+            f"auto-attaché(s) depuis plans/{folder_display} — "
+            f"{scan_result.rejected_count} rejeté(s), "
+            f"{scan_result.ignored_count} ignoré(s)"
+        )
+        refreshed = get_session(session.id, db_path=db_path) or session
+        try:
+            post_thread_message(client, refreshed, summary)
+        except Exception:
+            logger.exception(
+                "Could not post plans auto-scan summary for session %s", session.id
+            )
 
     event_callback = _make_event_callback(client, db_path)
     executor.submit(_run_pipeline_bg, session.id, db_path, event_callback)

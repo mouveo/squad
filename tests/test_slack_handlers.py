@@ -1136,3 +1136,222 @@ class TestHandlePickAllAngles:
         assert refreshed.benchmark_all_angles is False
         assert refreshed.selected_angle_idx is None
         assert executor.submitted == []
+
+
+# ── Plans auto-scan integration (Plan 9 — LOT 4) ──────────────────────────────
+
+
+@pytest.fixture
+def fake_home_for_autoscan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Sandbox Path.home() so load_config() never leaks real user config."""
+    monkeypatch.setenv("HOME", str(tmp_path / "_home"))
+    return tmp_path
+
+
+class TestSquadNewAutoScan:
+    def test_imports_files_before_pipeline_starts(
+        self, db_path, config, executor, client, project, fake_home_for_autoscan
+    ):
+        plans_folder = project / "plans" / "whaou"
+        plans_folder.mkdir(parents=True)
+        (plans_folder / "brief.md").write_text("# brief")
+        (plans_folder / "bench.md").write_text("# bench")
+
+        respond = MagicMock()
+        handle_squad_command(
+            command=_command("new Ajouter le module whaou"),
+            respond=respond,
+            client=client,
+            db_path=db_path,
+            executor=executor,
+            config=config,
+        )
+
+        session = list_active_sessions(db_path=db_path)[0]
+        attachments = Path(session.workspace_path) / "attachments"
+        names = {p.name for p in attachments.iterdir()}
+        assert names == {"brief.md", "bench.md"}
+
+        # Pipeline was scheduled AFTER the auto-scan (only one submit, for run_pipeline).
+        assert len(executor.submitted) == 1
+        fn, args, _ = executor.submitted[0]
+        assert fn.__name__ == "_run_pipeline_bg"
+
+    def test_posts_thread_summary_when_folder_matched(
+        self, db_path, config, executor, client, project, fake_home_for_autoscan
+    ):
+        plans_folder = project / "plans" / "whaou"
+        plans_folder.mkdir(parents=True)
+        (plans_folder / "a.md").write_text("a")
+        (plans_folder / "b.md").write_text("b")
+        (plans_folder / "c.md").write_text("c")
+
+        respond = MagicMock()
+        client.chat_postMessage.reset_mock()
+        handle_squad_command(
+            command=_command("new Ajouter le module whaou"),
+            respond=respond,
+            client=client,
+            db_path=db_path,
+            executor=executor,
+            config=config,
+        )
+
+        texts = [c.kwargs.get("text", "") for c in client.chat_postMessage.call_args_list]
+        summary = [t for t in texts if ":open_file_folder:" in t]
+        assert summary, "expected an auto-scan summary message in the thread"
+        assert "plans/whaou" in summary[0]
+        assert "3 fichier(s) auto-attaché(s)" in summary[0]
+        # posted as a thread reply (thread_ts set)
+        thread_calls = [
+            c for c in client.chat_postMessage.call_args_list
+            if ":open_file_folder:" in (c.kwargs.get("text", "") or "")
+        ]
+        assert thread_calls[0].kwargs.get("thread_ts") == "1700000000.000100"
+
+    def test_summary_splits_imported_rejected_ignored(
+        self,
+        db_path,
+        config,
+        executor,
+        client,
+        project,
+        fake_home_for_autoscan,
+        tmp_path,
+    ):
+        plans_folder = project / "plans" / "whaou"
+        plans_folder.mkdir(parents=True)
+        # 2 imported, 1 rejected, 2 ignored
+        (plans_folder / "a.md").write_bytes(b"ok")
+        (plans_folder / "b.md").write_bytes(b"ok")
+        (plans_folder / "big.md").write_bytes(b"x" * 2048)
+        (plans_folder / "bad.pdf").write_bytes(b"x")
+        (plans_folder / "bad2.bin").write_bytes(b"x")
+
+        # Project config: force per-file max to 1 KB so big.md is rejected by policy.
+        from squad.config import get_project_config_path
+
+        proj_cfg = get_project_config_path(project)
+        proj_cfg.parent.mkdir(parents=True, exist_ok=True)
+        proj_cfg.write_text("slack:\n  attachments:\n    max_file_bytes: 1024\n")
+
+        respond = MagicMock()
+        client.chat_postMessage.reset_mock()
+        handle_squad_command(
+            command=_command("new Ajouter le module whaou"),
+            respond=respond,
+            client=client,
+            db_path=db_path,
+            executor=executor,
+            config=config,
+        )
+
+        texts = [c.kwargs.get("text", "") for c in client.chat_postMessage.call_args_list]
+        summary = next(t for t in texts if ":open_file_folder:" in t)
+        assert "2 fichier(s) auto-attaché(s)" in summary
+        assert "1 rejeté" in summary
+        assert "2 ignoré" in summary
+        # Pipeline still scheduled even though one file was rejected
+        run_calls = [
+            s for s in executor.submitted if s[0].__name__ == "_run_pipeline_bg"
+        ]
+        assert len(run_calls) == 1
+
+    def test_pipeline_runs_even_when_some_files_rejected(
+        self, db_path, config, executor, client, project, fake_home_for_autoscan
+    ):
+        plans_folder = project / "plans" / "whaou"
+        plans_folder.mkdir(parents=True)
+        (plans_folder / "good.md").write_text("ok")
+        (plans_folder / "huge.md").write_bytes(b"x" * 2048)
+
+        from squad.config import get_project_config_path
+
+        proj_cfg = get_project_config_path(project)
+        proj_cfg.parent.mkdir(parents=True, exist_ok=True)
+        proj_cfg.write_text("slack:\n  attachments:\n    max_file_bytes: 1024\n")
+
+        respond = MagicMock()
+        handle_squad_command(
+            command=_command("new Ajouter le module whaou"),
+            respond=respond,
+            client=client,
+            db_path=db_path,
+            executor=executor,
+            config=config,
+        )
+
+        session = list_active_sessions(db_path=db_path)[0]
+        attachments = Path(session.workspace_path) / "attachments"
+        names = {p.name for p in attachments.iterdir()}
+        assert "good.md" in names
+        assert "huge.md" not in names
+        assert len(executor.submitted) == 1
+        assert executor.submitted[0][0].__name__ == "_run_pipeline_bg"
+
+    def test_no_matching_folder_leaves_flow_unchanged(
+        self, db_path, config, executor, client, project, fake_home_for_autoscan
+    ):
+        # No plans/ directory at all
+        respond = MagicMock()
+        client.chat_postMessage.reset_mock()
+        handle_squad_command(
+            command=_command("new Ajouter un module totalement inconnu"),
+            respond=respond,
+            client=client,
+            db_path=db_path,
+            executor=executor,
+            config=config,
+        )
+        texts = [c.kwargs.get("text", "") for c in client.chat_postMessage.call_args_list]
+        assert not any(":open_file_folder:" in t for t in texts)
+        # Root message + pipeline start still happened
+        assert client.chat_postMessage.call_count == 1
+        assert len(executor.submitted) == 1
+
+    def test_root_post_failure_does_not_block_scan_or_pipeline(
+        self, db_path, config, executor, project, fake_home_for_autoscan
+    ):
+        plans_folder = project / "plans" / "whaou"
+        plans_folder.mkdir(parents=True)
+        (plans_folder / "brief.md").write_text("# brief")
+
+        client = MagicMock()
+        client.chat_postMessage.side_effect = Exception("slack boom")
+
+        respond = MagicMock()
+        handle_squad_command(
+            command=_command("new Ajouter le module whaou"),
+            respond=respond,
+            client=client,
+            db_path=db_path,
+            executor=executor,
+            config=config,
+        )
+        # File was imported even though Slack posting failed
+        session = list_active_sessions(db_path=db_path)[0]
+        attachments = Path(session.workspace_path) / "attachments"
+        assert {p.name for p in attachments.iterdir()} == {"brief.md"}
+        # Pipeline still scheduled
+        assert len(executor.submitted) == 1
+        assert executor.submitted[0][0].__name__ == "_run_pipeline_bg"
+
+    def test_no_summary_when_folder_matched_but_empty(
+        self, db_path, config, executor, client, project, fake_home_for_autoscan
+    ):
+        (project / "plans" / "whaou").mkdir(parents=True)
+
+        respond = MagicMock()
+        client.chat_postMessage.reset_mock()
+        handle_squad_command(
+            command=_command("new Ajouter le module whaou"),
+            respond=respond,
+            client=client,
+            db_path=db_path,
+            executor=executor,
+            config=config,
+        )
+        texts = [c.kwargs.get("text", "") for c in client.chat_postMessage.call_args_list]
+        assert not any(":open_file_folder:" in t for t in texts)
+        # Only the root message was posted
+        assert client.chat_postMessage.call_count == 1

@@ -13,6 +13,7 @@ from squad.attachment_service import (
     INLINE_TEXT_EXTENSIONS,
     AttachmentError,
     download_file,
+    import_local_attachment,
     list_attachments,
     store_attachment,
     validate_attachment,
@@ -161,6 +162,78 @@ class TestListAttachments:
 
     def test_unknown_session_returns_empty(self, db_path):
         assert list_attachments("ghost", db_path=db_path) == []
+
+
+# ── import_local_attachment ───────────────────────────────────────────────────
+
+
+class TestImportLocalAttachment:
+    def test_stores_local_markdown(self, db_path, session, tmp_path):
+        src = tmp_path / "brief.md"
+        src.write_bytes(b"x" * 1024)
+
+        meta = import_local_attachment(session.id, src, db_path=db_path)
+
+        assert meta.slack_file_id is None
+        assert meta.filename == "brief.md"
+        assert meta.size_bytes == 1024
+        stored = Path(session.workspace_path) / "attachments" / "brief.md"
+        assert stored.exists()
+        assert stored.read_bytes() == b"x" * 1024
+
+    def test_rejects_disallowed_extension(self, db_path, session, tmp_path):
+        src = tmp_path / "evil.exe"
+        src.write_bytes(b"MZ")
+        with pytest.raises(AttachmentError, match="non autorisée"):
+            import_local_attachment(session.id, src, db_path=db_path)
+
+    def test_rejects_oversized_file(self, db_path, session, tmp_path):
+        src = tmp_path / "huge.md"
+        src.write_bytes(b"x" * (DEFAULT_MAX_FILE_BYTES + 1))
+        with pytest.raises(AttachmentError, match="trop volumineux"):
+            import_local_attachment(session.id, src, db_path=db_path)
+
+    def test_quota_applied_with_existing_slack_attachments(self, db_path, session, tmp_path):
+        # Simulate prior Slack-sourced attachments filling the cumulative cap
+        attachments = Path(session.workspace_path) / "attachments"
+        for i in range(5):
+            (attachments / f"slack-{i}.bin").write_bytes(b"x" * DEFAULT_MAX_FILE_BYTES)
+
+        src = tmp_path / "extra.md"
+        src.write_bytes(b"x" * 1024)
+
+        with pytest.raises(AttachmentError, match="Quota"):
+            import_local_attachment(session.id, src, db_path=db_path)
+
+    def test_missing_path_raises_attachment_error(self, db_path, session, tmp_path):
+        missing = tmp_path / "does-not-exist.md"
+        with pytest.raises(AttachmentError, match="introuvable"):
+            import_local_attachment(session.id, missing, db_path=db_path)
+
+    def test_directory_path_raises_attachment_error(self, db_path, session, tmp_path):
+        a_dir = tmp_path / "some-dir"
+        a_dir.mkdir()
+        with pytest.raises(AttachmentError, match="pas un fichier"):
+            import_local_attachment(session.id, a_dir, db_path=db_path)
+
+    def test_unreadable_file_raises_attachment_error(self, db_path, session, tmp_path):
+        src = tmp_path / "secret.md"
+        src.write_bytes(b"x")
+
+        def _boom(self, *args, **kwargs):
+            raise OSError("permission denied")
+
+        with patch.object(Path, "read_bytes", _boom):
+            with pytest.raises(AttachmentError, match="Lecture impossible"):
+                import_local_attachment(session.id, src, db_path=db_path)
+
+    def test_respects_config_overrides(self, db_path, session, tmp_path):
+        src = tmp_path / "note.mdx"
+        src.write_bytes(b"hello")
+        cfg = {"slack": {"attachments": {"allowed_extensions": ["mdx"]}}}
+        meta = import_local_attachment(session.id, src, config=cfg, db_path=db_path)
+        assert meta.filename == "note.mdx"
+        assert meta.slack_file_id is None
 
 
 # ── download_file ─────────────────────────────────────────────────────────────

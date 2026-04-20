@@ -246,6 +246,43 @@ def store_attachment(
     return meta
 
 
+# ── local import ──────────────────────────────────────────────────────────────
+
+
+def import_local_attachment(
+    session_id: str,
+    src_path: Path,
+    *,
+    config: dict | None = None,
+    db_path: Path | None = None,
+) -> AttachmentMeta:
+    """Import a local file into the session's attachments directory.
+
+    Reads the file from ``src_path`` and delegates to :func:`store_attachment`
+    so the size / extension / cumulative-quota policy stays centralised.
+    Filesystem errors are converted into short :class:`AttachmentError`
+    messages suitable for surfacing to the user.
+    """
+    src = Path(src_path)
+    if not src.exists():
+        raise AttachmentError(f"Fichier introuvable : {src}")
+    if not src.is_file():
+        raise AttachmentError(f"Chemin non lisible (pas un fichier) : {src}")
+    try:
+        content = src.read_bytes()
+    except OSError as exc:
+        raise AttachmentError(f"Lecture impossible de `{src.name}` : {exc}") from exc
+
+    return store_attachment(
+        session_id,
+        src.name,
+        content,
+        slack_file_id=None,
+        config=config,
+        db_path=db_path,
+    )
+
+
 # ── listing ───────────────────────────────────────────────────────────────────
 
 
