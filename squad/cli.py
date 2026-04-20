@@ -45,6 +45,7 @@ from squad.forge_bridge import (
 from squad.forge_format import validate_plan
 from squad.notifier import notify_fallback_review, notify_queued
 from squad.pipeline import PipelineError, resume_pipeline, run_pipeline
+from squad.plans_autoscan import autoscan_and_import_plans
 from squad.review_service import reject_session
 from squad.workspace import (
     create_workspace,
@@ -102,6 +103,40 @@ def _create_and_init_session(project_path: str, idea: str, mode: str, db_path: P
     return session
 
 
+def _run_plans_autoscan_cli(
+    session, idea: str, *, disabled: bool, db_path: Path
+) -> None:
+    """Run the shared plans auto-scan and print a short summary to stdout.
+
+    When ``disabled`` is ``True`` (CLI ``--no-plans-autoscan`` flag), the
+    helper is bypassed and a single line is printed. Otherwise the
+    ``pipeline.project_plans_autoscan`` config key decides, and the
+    helper emits one line only when a folder was matched — silence
+    otherwise.
+    """
+    if disabled:
+        click.echo("Auto-scan : désactivé")
+        return
+    try:
+        result = autoscan_and_import_plans(session, idea, db_path=db_path)
+    except Exception as exc:  # defensive — auto-scan must never abort the run
+        click.echo(f"Auto-scan : erreur — {exc}")
+        return
+    if not result.enabled or result.folder is None:
+        return
+    total = result.imported_count + result.rejected_count + result.ignored_count
+    if total == 0:
+        click.echo(
+            f"Auto-scan : dossier `{result.folder}` — aucun fichier éligible."
+        )
+        return
+    click.echo(
+        f"Auto-scan : {result.imported_count} importé(s), "
+        f"{result.rejected_count} rejeté(s), {result.ignored_count} ignoré(s) "
+        f"depuis `{result.folder}`."
+    )
+
+
 @click.group()
 def cli() -> None:
     """Squad — AI product squad that turns ideas into Forge-executable plans."""
@@ -151,7 +186,16 @@ def init(project_path: str | None, force: bool) -> None:
         "Falls back to the configured `mode` (default: approval) when omitted."
     ),
 )
-def start(project_path: str, idea: str, mode: str | None) -> None:
+@click.option(
+    "--no-plans-autoscan",
+    "no_plans_autoscan",
+    is_flag=True,
+    default=False,
+    help="Skip the {project}/plans/<subject>/ auto-scan for this run.",
+)
+def start(
+    project_path: str, idea: str, mode: str | None, no_plans_autoscan: bool
+) -> None:
     """Start a new Squad session for PROJECT_PATH with IDEA."""
     db_path = get_global_db_path()
     ensure_schema(db_path)
@@ -166,6 +210,10 @@ def start(project_path: str, idea: str, mode: str | None) -> None:
     click.echo(f"  Mode    : {session.mode}")
     click.echo(f"  Project : {session.project_path}")
     click.echo(f"  Status  : {session.status}")
+
+    _run_plans_autoscan_cli(
+        session, idea, disabled=no_plans_autoscan, db_path=db_path
+    )
 
     try:
         run_pipeline(session.id, db_path=db_path)
@@ -196,7 +244,16 @@ def start(project_path: str, idea: str, mode: str | None) -> None:
         "Defaults to `approval`, which drives questions and review inline."
     ),
 )
-def run_cmd(project_path: str, idea: str, mode: str | None) -> None:
+@click.option(
+    "--no-plans-autoscan",
+    "no_plans_autoscan",
+    is_flag=True,
+    default=False,
+    help="Skip the {project}/plans/<subject>/ auto-scan for this run.",
+)
+def run_cmd(
+    project_path: str, idea: str, mode: str | None, no_plans_autoscan: bool
+) -> None:
     """One-shot: start, answer pending questions inline, review, submit.
 
     ``squad run`` orchestrates the same primitives as the asynchronous
@@ -217,6 +274,10 @@ def run_cmd(project_path: str, idea: str, mode: str | None) -> None:
     click.echo(f"Session started: {session.id}")
     click.echo(f"  Mode    : {session.mode}")
     click.echo(f"  Project : {session.project_path}")
+
+    _run_plans_autoscan_cli(
+        session, idea, disabled=no_plans_autoscan, db_path=db_path
+    )
 
     try:
         run_pipeline(session.id, db_path=db_path)

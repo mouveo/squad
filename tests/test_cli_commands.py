@@ -1037,3 +1037,167 @@ class TestRunCommand:
             )
         assert result.exit_code != 0
         assert "Empty answer" in result.output
+
+
+# ── Plans auto-scan integration (Plan 9 — LOT 5) ──────────────────────────────
+
+
+class TestStartAutoScan:
+    def test_imports_files_from_matching_folder(
+        self, runner: CliRunner, db_path: Path, project_dir: Path
+    ):
+        plans = project_dir / "plans" / "whaou"
+        plans.mkdir(parents=True)
+        (plans / "brief.md").write_text("# brief")
+        (plans / "bench.md").write_text("# bench")
+
+        result = _run(runner, db_path, "start", str(project_dir), "Lancer le sujet whaou")
+        assert result.exit_code == 0
+        sessions = list_active_sessions(db_path=db_path)
+        attachments = Path(sessions[0].workspace_path) / "attachments"
+        assert {p.name for p in attachments.iterdir()} == {"brief.md", "bench.md"}
+
+    def test_prints_summary_when_folder_matched(
+        self, runner: CliRunner, db_path: Path, project_dir: Path
+    ):
+        plans = project_dir / "plans" / "whaou"
+        plans.mkdir(parents=True)
+        (plans / "a.md").write_text("a")
+        (plans / "b.md").write_text("b")
+
+        result = _run(runner, db_path, "start", str(project_dir), "Lancer le sujet whaou")
+        assert result.exit_code == 0
+        assert "Auto-scan : 2 importé(s)" in result.output
+        assert "plans/whaou" in result.output or "whaou" in result.output
+
+    def test_silent_when_no_folder_matches(
+        self, runner: CliRunner, db_path: Path, project_dir: Path
+    ):
+        result = _run(runner, db_path, "start", str(project_dir), "Lancer un sujet inconnu")
+        assert result.exit_code == 0
+        assert "Auto-scan" not in result.output
+
+    def test_no_plans_autoscan_flag_disables_and_prints(
+        self, runner: CliRunner, db_path: Path, project_dir: Path
+    ):
+        plans = project_dir / "plans" / "whaou"
+        plans.mkdir(parents=True)
+        (plans / "a.md").write_text("a")
+
+        result = _run(
+            runner,
+            db_path,
+            "start",
+            str(project_dir),
+            "Lancer le sujet whaou",
+            "--no-plans-autoscan",
+        )
+        assert result.exit_code == 0
+        assert "Auto-scan : désactivé" in result.output
+        sessions = list_active_sessions(db_path=db_path)
+        attachments = Path(sessions[0].workspace_path) / "attachments"
+        assert list(attachments.iterdir()) == []
+
+    def test_config_key_disables_autoscan(
+        self, runner: CliRunner, db_path: Path, project_dir: Path
+    ):
+        plans = project_dir / "plans" / "whaou"
+        plans.mkdir(parents=True)
+        (plans / "a.md").write_text("a")
+
+        cfg = project_dir / ".squad" / "config.yaml"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text("pipeline:\n  project_plans_autoscan: false\n")
+
+        result = _run(runner, db_path, "start", str(project_dir), "Lancer le sujet whaou")
+        assert result.exit_code == 0
+        # Silent when the config key is false (no folder-level message)
+        assert "Auto-scan" not in result.output
+        sessions = list_active_sessions(db_path=db_path)
+        attachments = Path(sessions[0].workspace_path) / "attachments"
+        assert list(attachments.iterdir()) == []
+
+    def test_runs_before_pipeline(
+        self, runner: CliRunner, db_path: Path, project_dir: Path
+    ):
+        """The import must complete before run_pipeline is invoked."""
+        plans = project_dir / "plans" / "whaou"
+        plans.mkdir(parents=True)
+        (plans / "brief.md").write_text("# brief")
+
+        observed: dict = {}
+
+        def _capture(session_id, **kwargs):
+            sess = list_active_sessions(db_path=db_path)[0]
+            attachments_dir = Path(sess.workspace_path) / "attachments"
+            observed["files"] = sorted(p.name for p in attachments_dir.iterdir())
+            return None
+
+        with (
+            patch("squad.cli.get_global_db_path", return_value=db_path),
+            patch("squad.cli.run_pipeline", side_effect=_capture),
+        ):
+            result = runner.invoke(
+                cli,
+                ["start", str(project_dir), "Lancer le sujet whaou"],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        assert observed.get("files") == ["brief.md"]
+
+
+class TestRunAutoScan:
+    def test_imports_files_from_matching_folder(
+        self, runner: CliRunner, db_path: Path, project_dir: Path
+    ):
+        plans = project_dir / "plans" / "whaou"
+        plans.mkdir(parents=True)
+        (plans / "brief.md").write_text("# brief")
+
+        # In approval mode, after run_pipeline returns status stays draft,
+        # so _drive_interactive_questions sees the session not interviewing
+        # and returns immediately. No prompting needed.
+        result = _run(runner, db_path, "run", str(project_dir), "Lancer le sujet whaou")
+        assert result.exit_code == 0
+        sessions = list_active_sessions(db_path=db_path)
+        attachments = Path(sessions[0].workspace_path) / "attachments"
+        assert {p.name for p in attachments.iterdir()} == {"brief.md"}
+
+    def test_no_plans_autoscan_flag_disables(
+        self, runner: CliRunner, db_path: Path, project_dir: Path
+    ):
+        plans = project_dir / "plans" / "whaou"
+        plans.mkdir(parents=True)
+        (plans / "brief.md").write_text("# brief")
+
+        result = _run(
+            runner,
+            db_path,
+            "run",
+            str(project_dir),
+            "Lancer le sujet whaou",
+            "--no-plans-autoscan",
+        )
+        assert result.exit_code == 0
+        assert "Auto-scan : désactivé" in result.output
+        sessions = list_active_sessions(db_path=db_path)
+        attachments = Path(sessions[0].workspace_path) / "attachments"
+        assert list(attachments.iterdir()) == []
+
+    def test_prints_summary_when_folder_matched(
+        self, runner: CliRunner, db_path: Path, project_dir: Path
+    ):
+        plans = project_dir / "plans" / "whaou"
+        plans.mkdir(parents=True)
+        (plans / "a.md").write_text("a")
+
+        result = _run(runner, db_path, "run", str(project_dir), "Lancer le sujet whaou")
+        assert result.exit_code == 0
+        assert "Auto-scan : 1 importé(s)" in result.output
+
+    def test_silent_when_no_folder_matches(
+        self, runner: CliRunner, db_path: Path, project_dir: Path
+    ):
+        result = _run(runner, db_path, "run", str(project_dir), "Lancer un sujet inconnu")
+        assert result.exit_code == 0
+        assert "Auto-scan" not in result.output
