@@ -260,7 +260,7 @@ def list_sessions_for_dashboard(
                 ),
                 updated_at=session.updated_at,
                 created_at=session.created_at,
-                age_fr=humanize_age_fr(session.updated_at, now=now_dt),
+                age_fr=humanize_age_fr(session.created_at, now=now_dt),
                 is_active=session.status in ACTIVE_STATUSES,
                 pending_questions=pending,
                 plans_count=plans,
@@ -393,7 +393,7 @@ def get_session_detail(
         failure_reason=session.failure_reason,
         status_label=STATUS_LABELS.get(session.status, session.status),
         status_tone=STATUS_TONES.get(session.status, "neutral"),
-        age_fr=humanize_age_fr(session.updated_at, now=now_dt),
+        age_fr=humanize_age_fr(session.created_at, now=now_dt),
         plans_count=len(plans),
     )
 
