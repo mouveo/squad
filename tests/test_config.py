@@ -334,6 +334,47 @@ class TestPipelineContextBudget:
         )
 
 
+# ── Plans auto-scan (Plan 9 — LOT 6) ──────────────────────────────────────────
+
+
+class TestPlansAutoScanConfig:
+    def test_default_yaml_documents_autoscan_key(self):
+        # The commented-out `project_plans_autoscan` line documents the
+        # opt-out knob for projects whose `plans/` subfolder hosts
+        # unrelated content.
+        assert "project_plans_autoscan: true" in DEFAULT_CONFIG_YAML
+
+    def test_default_yaml_mentions_subject_token_semantics(self):
+        assert "{project}/plans/<subject>/" in DEFAULT_CONFIG_YAML
+
+    def test_project_override_to_false_visible(self, fake_home: Path, tmp_path: Path):
+        proj = tmp_path / "p"
+        proj_cfg = get_project_config_path(proj)
+        proj_cfg.parent.mkdir(parents=True)
+        proj_cfg.write_text("pipeline:\n  project_plans_autoscan: false\n")
+        assert (
+            get_config_value(
+                "pipeline.project_plans_autoscan",
+                project_path=proj,
+                default=True,
+            )
+            is False
+        )
+
+    def test_default_when_key_absent(self, fake_home: Path, tmp_path: Path):
+        # With no user config the helper returns the provided default; the
+        # runtime default (True) is covered in test_plans_autoscan.py.
+        proj = tmp_path / "p"
+        assert (
+            get_config_value(
+                "pipeline.project_plans_autoscan",
+                project_path=proj,
+                default=True,
+            )
+            is True
+        )
+
+
 # ── Default model comment (LOT 1 — Plan 7) ────────────────────────────────────
 
 

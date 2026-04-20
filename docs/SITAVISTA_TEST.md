@@ -1,10 +1,19 @@
 # Test end-to-end Sitavista — procédure propre
 
 Script reproductible pour lancer une vraie session Squad sur
-`~/Developer/sitavista` avec la deepsearch CRM comme pièce jointe, et
-vérifier que le pipeline sort des plans Forge exécutables.
+`~/Developer/sitavista` avec la deepsearch CRM pré-posée dans
+`sitavista/plans/<subject>/`, et vérifier que le pipeline sort des
+plans Forge exécutables.
 
-À faire **après merge des plans 7 (hardening) et 8 (dashboard)**.
+À faire **après merge des plans 7 (hardening), 8 (dashboard) et 9
+(plans auto-scan)**.
+
+La procédure principale s'appuie sur l'auto-scan
+`{project}/plans/<subject>/` (Plan 9) : Squad détecte le dossier dès
+que l'idée contient le token `<subject>`, importe les `.md/.txt/.csv`
+avant la première phase, et affiche un résumé. Le drag-drop Slack
+reste le fallback pour les fichiers qui n'ont pas encore été posés
+côté filesystem.
 
 ## Pré-flight
 
@@ -23,8 +32,16 @@ Checks manuels si pas encore de script :
    et `.venv/bin/pytest -m "not integration" --tb=no -q` passe.
 3. **Claude CLI auth** : `claude --print "hi" --max-turns 1` répond.
 4. **Sitavista présent** : `ls ~/Developer/sitavista/CLAUDE.md` existe.
-5. **Deepsearch dispo** :
-   `ls ~/Developer/sitavista/plans/deep-research/deep-research-report-crm-comparison-sitavista-vs-leaders.md`.
+5. **Deepsearch pré-posée dans `plans/<subject>/`** :
+   ```bash
+   mkdir -p ~/Developer/sitavista/plans/crm
+   cp ~/Developer/sitavista/plans/deep-research/deep-research-report-crm-comparison-sitavista-vs-leaders.md \
+      ~/Developer/sitavista/plans/crm/
+   ls ~/Developer/sitavista/plans/crm/
+   ```
+   Le token `crm` (ou `deepsearch`, `refonte`, etc. — tout mot ≥ 3
+   caractères que tu mettras dans l'idée) doit être présent dans
+   l'idée ci-dessous pour déclencher l'auto-scan.
 6. **Slack config** : `SQUAD_SLACK_BOT_TOKEN` et `SQUAD_SLACK_APP_TOKEN`
    dans l'env ; `~/.squad/config.yaml` contient `bot_token:
    ${SQUAD_SLACK_BOT_TOKEN}` et `app_token: ${SQUAD_SLACK_APP_TOKEN}`.
@@ -48,19 +65,20 @@ Vérifier dans `~/.squad/serve.log` :
 ## Prompt à coller dans Slack
 
 Dans `#squad-chat` (ou n'importe quel channel où `@Squad` est invité),
-taper la commande suivante, **glisser la deepsearch dans le même
-composer**, puis envoyer (⌘+Return).
+taper simplement la commande suivante **sans rien glisser** : la
+deepsearch est déjà dans `sitavista/plans/crm/` et sera auto-attachée
+dès que l'idée contient `crm`.
 
 ```
 /squad new Refonte progressive du CRM Sitavista pour combler le gap
 fonctionnel et UX avec Pipedrive, HubSpot et Monday CRM, en
 conservant les 3 avantages différenciants : modèle natif
 Network→Agency multi-tenant, module RDV riche, copilote IA
-contextuel. Une deepsearch est jointe dans le thread : audit actuel,
-benchmark feature-par-feature, analyse UX/UI, reco priorisée, pièges
-à éviter, pricing. Exploite-la comme source de vérité — ne refais
-pas la recherche web, ne ré-audite pas les concurrents. Stack :
-Laravel 13 + Inertia v2 + React 18 + TypeScript + Tailwind v4 +
+contextuel. Une deepsearch est disponible dans plans/crm/ : audit
+actuel, benchmark feature-par-feature, analyse UX/UI, reco priorisée,
+pièges à éviter, pricing. Exploite-la comme source de vérité — ne
+refais pas la recherche web, ne ré-audite pas les concurrents. Stack
+: Laravel 13 + Inertia v2 + React 18 + TypeScript + Tailwind v4 +
 shadcn/ui, RBAC 9 rôles, Redis tags invalidation. Trajectoire cible
 recommandée : 1) fiche record refondue HubSpot-like avec 3 colonnes,
 tabs, cards collapsibles ; 2) pipeline cockpit avec preview drawer +
@@ -73,11 +91,40 @@ complet, workflow builder open-ended. Produis des plans Forge
 exécutables par lots atomiques.
 ```
 
+**Ce qui se passe après envoi** :
+1. Squad crée la session et poste le message racine dans `#squad-chat`.
+2. L'auto-scan détecte `sitavista/plans/crm/` (token `crm` dans l'idée)
+   et importe tous les `.md` présents.
+3. Le thread reçoit :
+   `:open_file_folder: N fichier(s) auto-attaché(s) depuis plans/crm
+   — 0 rejeté, 0 ignoré`.
+4. Le pipeline démarre avec la deepsearch déjà dans le contexte.
+
+### Fallback — drag-drop Slack
+
+Si la deepsearch n'existe pas encore côté filesystem (fraîchement
+exportée depuis un outil externe, par exemple), le workflow
+historique reste disponible :
+
 **Fichier à joindre** :
 `/Users/olivier/Developer/sitavista/plans/deep-research/deep-research-report-crm-comparison-sitavista-vs-leaders.md`
 
 Grâce au fix `cdd62ce` (auto-attach < 120s), le fichier sera injecté
 dans la session même s'il arrive avant que le bot ait créé le thread.
+
+### Variante CLI
+
+Même logique, sans Slack :
+
+```bash
+cd ~/Developer
+squad run sitavista "Refonte progressive du CRM Sitavista — exploite la deepsearch dans plans/crm/…"
+# ou pour bypasser l'auto-scan ponctuellement :
+squad run sitavista "…" --no-plans-autoscan
+```
+
+Le CLI imprime `Auto-scan : N importé(s), 0 rejeté(s), 0 ignoré(s)
+depuis …` avant de démarrer le pipeline.
 
 ## Checkpoints attendus
 

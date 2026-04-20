@@ -150,6 +150,61 @@ phases les plus récentes ne sont jamais compressées.
 tokens) dans `~/.squad/config.yaml` (`model: claude-opus-4-7[1m]`)
 débloque temporairement.
 
+### Auto-scan `{project}/plans/<subject>/` vide ou silencieux
+
+**Symptôme** : tu as préparé `~/Developer/<projet>/plans/<sujet>/` avec
+des `.md`, tu lances `/squad new "<idée qui contient <sujet>>"` — mais
+rien n'apparaît dans `{workspace}/attachments/` et aucun
+`:open_file_folder:` ne tombe dans le thread Slack (ou aucune ligne
+`Auto-scan :` côté CLI).
+
+**Checklist dans l'ordre** :
+
+1. **Le token de l'idée matche-t-il le nom du sous-dossier ?**
+   Le token est extrait par la regex `[a-z0-9][a-z0-9\-_]{2,}` et doit
+   faire ≥ 3 caractères. "ab", "x1" ne matchent pas. Le match est
+   insensible à la casse. Vérifie :
+   ```bash
+   ls ~/Developer/<projet>/plans/
+   ```
+   Le nom du dossier doit apparaître tel quel (lowercased) dans l'idée.
+
+2. **Le dossier contient-il des fichiers texte directs ?** Seuls
+   `.md`, `.txt`, `.csv` sont retenus, **pas de récursion** dans les
+   sous-dossiers. Les `.pdf`, `.png` etc. sont comptés comme ignorés.
+
+3. **Auto-scan désactivé ?** Vérifie :
+   ```bash
+   grep project_plans_autoscan ~/Developer/<projet>/.squad/config.yaml
+   ```
+   Si la clé vaut `false`, l'auto-scan est off pour ce projet. Côté
+   CLI, `--no-plans-autoscan` produit explicitement
+   `Auto-scan : désactivé` en sortie.
+
+4. **Plus de 10 fichiers dans le dossier ?** Le cap est 10 (tri alpha).
+   Le surplus est compté comme `ignored`, pas rejeté.
+
+5. **Fichier rejeté par la policy ?** Un `.md` > 10 Mo, ou l'extension
+   retirée via `slack.attachments.allowed_extensions`, remonte dans
+   `rejected_count`. Regarde les logs :
+   ```bash
+   grep "plans auto-scan" ~/.squad/serve.log | tail
+   ```
+
+6. **Le pipeline a-t-il vu les fichiers ?** Inspecte le workspace :
+   ```bash
+   ls {project}/.squad/sessions/<uuid>/attachments/
+   ```
+   Les fichiers doivent y être **avant** que la première phase tourne.
+
+**Notes** :
+- Le message thread `:open_file_folder:` n'est posté **que** si le
+  dossier a été matché et qu'au moins un fichier a été imported,
+  rejected ou ignored. Dossier vide → pas de message, c'est voulu.
+- Côté CLI, la sortie est silencieuse si aucun dossier ne matche. Si
+  tu veux vérifier le routage, lance avec `squad run` et cherche la
+  ligne `Auto-scan : …` dans stdout.
+
 ## Commandes d'audit
 
 ```bash

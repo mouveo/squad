@@ -105,6 +105,12 @@ pipeline:
   # summaries with an explicit omission marker, and as a last resort
   # truncates with a `[… contexte tronqué au-delà du budget]` marker.
   # context_budget_chars: 60000
+  #
+  # Auto-import text briefs from {project}/plans/<subject>/ when the idea
+  # mentions <subject>. Enabled by default in code even if this key stays
+  # commented out here. Disable with `false` for projects that use `plans/`
+  # for unrelated content.
+  # project_plans_autoscan: true
 """
 
 
