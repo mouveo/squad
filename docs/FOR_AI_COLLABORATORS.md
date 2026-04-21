@@ -36,19 +36,17 @@ en argument positionnel.
 **Squad accepte des fichiers**, contrairement à ce qu'une IA mal
 informée pourrait répondre.
 
-#### Workflow préféré — dossier `{projet}/plans/<sujet>/`
+#### Workflow préféré — écrire le path dans l'idée
 
 Quand tu prépares un brief à froid (deepsearch, audit, notes), **pose
-les `.md/.txt/.csv` dans `{projet}/plans/<sujet>/`** avant de lancer
-la session. Squad détecte le dossier automatiquement dès que l'idée
-contient le token `<sujet>` (≥ 3 caractères, insensible à la casse)
-et importe tous les fichiers texte éligibles avant la première phase.
-C'est l'option par défaut, plus fiable que le drag-drop Slack (pas de
-fenêtre temporelle à rater, pas de risque qu'un fichier arrive après
-le démarrage du pipeline).
+les `.md/.txt/.csv` dans `{projet}/plans/<sujet>/`** ET **mentionne
+explicitement le path `plans/<sujet>/` dans ton idée**. Squad extrait
+chaque path `plans/...` qu'il trouve dans le texte et importe les
+fichiers éligibles avant la première phase. Zéro guesswork, zéro
+collision possible avec un mot de l'idée qui matcherait par hasard un
+nom de dossier.
 
-Exemple concret : pour travailler le module "whaou" de Ressort, tu
-prépares le dossier comme suit :
+Exemple concret :
 
 ```
 ~/Developer/ressort/
@@ -59,15 +57,27 @@ prépares le dossier comme suit :
         └── reco-prioritisee.md
 ```
 
-Puis tu lances `/squad new Ajouter le module whaou à Ressort`
-(Slack) ou `squad run ressort "Ajouter le module whaou"` (CLI). Les
-trois `.md` sont auto-attachés avant le cadrage ; la session Slack
-affiche `:open_file_folder: 3 fichier(s) auto-attaché(s) depuis
-plans/whaou — 0 rejeté, 0 ignoré` dans le thread, et le CLI imprime
+Puis :
+- Slack : `/squad new Ajouter le module whaou à Ressort — voir plans/whaou.`
+- CLI : `squad run ressort "Ajouter le module whaou — voir plans/whaou"`
+
+Les trois `.md` sont auto-attachés avant le cadrage ; Slack affiche
+`:open_file_folder: 3 fichier(s) auto-attaché(s) depuis plans/whaou
+— 0 rejeté, 0 ignoré` dans le thread, et le CLI imprime
 `Auto-scan : 3 importé(s), 0 rejeté(s), 0 ignoré(s) depuis …`.
 
-Scope retenu : uniquement les fichiers directs `.md/.txt/.csv` (pas
-de récursion), tri alphabétique, capé à 10 fichiers. Les autres
+Patterns reconnus dans l'idée :
+
+* `plans/<nom>` ou `plans/<nom>/` — importe tous les fichiers éligibles
+  du dossier (non-récursif).
+* `plans/<nom>/<fichier>.md` — importe juste ce fichier.
+* Plusieurs paths dans la même idée → tous importés.
+* La ponctuation de fin de phrase (`.,;:!?)"'`) est retirée automatiquement.
+* Un path qui ne pointe sur rien d'existant est **silencieusement
+  ignoré** (typo).
+
+Scope retenu : fichiers directs `.md/.txt/.csv` (pas de récursion),
+tri alphabétique, capé à 10 fichiers par dossier. Les autres
 extensions et le surplus sont comptés comme *ignorés*.
 
 Clé de config projet pour opt-out : `pipeline.project_plans_autoscan:

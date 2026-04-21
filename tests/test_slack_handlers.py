@@ -1159,7 +1159,7 @@ class TestSquadNewAutoScan:
 
         respond = MagicMock()
         handle_squad_command(
-            command=_command("new Ajouter le module whaou"),
+            command=_command("new Ajouter le module whaou — voir plans/whaou"),
             respond=respond,
             client=client,
             db_path=db_path,
@@ -1189,7 +1189,7 @@ class TestSquadNewAutoScan:
         respond = MagicMock()
         client.chat_postMessage.reset_mock()
         handle_squad_command(
-            command=_command("new Ajouter le module whaou"),
+            command=_command("new Ajouter le module whaou — voir plans/whaou"),
             respond=respond,
             client=client,
             db_path=db_path,
@@ -1238,7 +1238,7 @@ class TestSquadNewAutoScan:
         respond = MagicMock()
         client.chat_postMessage.reset_mock()
         handle_squad_command(
-            command=_command("new Ajouter le module whaou"),
+            command=_command("new Ajouter le module whaou — voir plans/whaou"),
             respond=respond,
             client=client,
             db_path=db_path,
@@ -1273,7 +1273,7 @@ class TestSquadNewAutoScan:
 
         respond = MagicMock()
         handle_squad_command(
-            command=_command("new Ajouter le module whaou"),
+            command=_command("new Ajouter le module whaou — voir plans/whaou"),
             respond=respond,
             client=client,
             db_path=db_path,
@@ -1321,7 +1321,7 @@ class TestSquadNewAutoScan:
 
         respond = MagicMock()
         handle_squad_command(
-            command=_command("new Ajouter le module whaou"),
+            command=_command("new Ajouter le module whaou — voir plans/whaou"),
             respond=respond,
             client=client,
             db_path=db_path,
@@ -1344,7 +1344,7 @@ class TestSquadNewAutoScan:
         respond = MagicMock()
         client.chat_postMessage.reset_mock()
         handle_squad_command(
-            command=_command("new Ajouter le module whaou"),
+            command=_command("new Ajouter le module whaou — voir plans/whaou"),
             respond=respond,
             client=client,
             db_path=db_path,

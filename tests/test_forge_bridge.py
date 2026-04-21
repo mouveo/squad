@@ -166,20 +166,38 @@ class TestAddPlanToQueue:
 
 
 class TestRunQueue:
-    def test_success(self):
-        with patch(
-            "squad.forge_bridge._run_forge",
-            return_value=_completed("queue started", 0),
+    def test_spawns_detached_process(self):
+        """``run_queue`` uses Popen with ``start_new_session=True`` so the
+        forge runner survives the parent's exit. We assert the right
+        kwargs are passed, without actually spawning anything."""
+        fake_proc = MagicMock()
+        fake_proc.poll.return_value = None  # still running after 500ms
+        fake_proc.pid = 1234
+        with patch("subprocess.Popen", return_value=fake_proc) as popen:
+            run_queue("/tmp/p")
+        args, kwargs = popen.call_args
+        assert args[0][:3] == ["forge", "queue", "run"]
+        assert args[0][3] == "/tmp/p"
+        assert kwargs.get("start_new_session") is True
+        assert kwargs.get("stdout") == subprocess.DEVNULL
+        assert kwargs.get("stderr") == subprocess.DEVNULL
+
+    def test_early_exit_raises(self):
+        """If the runner crashes within the 500ms sentinel window (bad
+        args, missing CLI), surface as ``ForgeUnavailable``."""
+        fake_proc = MagicMock()
+        fake_proc.poll.return_value = 1  # exited with error
+        fake_proc.returncode = 1
+        with (
+            patch("subprocess.Popen", return_value=fake_proc),
+            pytest.raises(ForgeUnavailable, match="exited with code 1"),
         ):
             run_queue("/tmp/p")
 
-    def test_failure_raises(self):
+    def test_missing_cli_raises(self):
         with (
-            patch(
-                "squad.forge_bridge._run_forge",
-                return_value=_completed("", 1, stderr="run broken"),
-            ),
-            pytest.raises(ForgeUnavailable, match="run broken"),
+            patch("subprocess.Popen", side_effect=FileNotFoundError("no forge")),
+            pytest.raises(ForgeUnavailable, match="not found on PATH"),
         ):
             run_queue("/tmp/p")
 

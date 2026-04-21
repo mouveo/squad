@@ -325,13 +325,17 @@ def _handle_new(
 
     if (
         scan_result is not None
-        and scan_result.folder is not None
-        and (scan_result.imported_count + scan_result.rejected_count + scan_result.ignored_count) > 0
+        and scan_result.enabled
+        and (scan_result.imported_count + scan_result.rejected_count) > 0
     ):
-        folder_display = scan_result.folder.name
+        folder_names = [f.name for f in scan_result.folders]
+        if folder_names:
+            source_display = "plans/" + ", plans/".join(folder_names)
+        else:
+            source_display = "fichier(s) explicite(s)"
         summary = (
             f":open_file_folder: {scan_result.imported_count} fichier(s) "
-            f"auto-attaché(s) depuis plans/{folder_display} — "
+            f"auto-attaché(s) depuis {source_display} — "
             f"{scan_result.rejected_count} rejeté(s), "
             f"{scan_result.ignored_count} ignoré(s)"
         )

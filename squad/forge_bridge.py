@@ -121,10 +121,45 @@ def add_plan_to_queue(project_path: str, plan_file: Path) -> None:
 
 
 def run_queue(project_path: str) -> None:
-    """Start the Forge queue run for ``project_path``."""
-    result = _run_forge(["queue", "run", project_path])
-    if result.returncode != 0:
-        raise ForgeUnavailable(f"forge queue run failed: {(result.stderr or result.stdout)[:200]}")
+    """Start the Forge queue run for ``project_path`` — non-blocking.
+
+    ``forge queue run`` is blocking by nature : it starts the runner and
+    stays attached until the whole queue is processed, which can take
+    hours. Squad only needs to fire it and return — the runner lives
+    on its own, the queue.lock file prevents duplication, and the user
+    monitors via ``forge queue list`` or the dashboard.
+
+    We spawn the process with ``subprocess.Popen`` and a detached
+    session (``start_new_session=True``), redirect stdout/stderr to
+    ``/dev/null`` so the parent can exit without closing them, and
+    return immediately. A short sentinel check (``poll()`` after 500ms)
+    catches early crashes (wrong args, missing CLI) so those still
+    surface as ``ForgeUnavailable``.
+    """
+    import time
+
+    try:
+        proc = subprocess.Popen(
+            [FORGE_CMD, "queue", "run", project_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except FileNotFoundError as exc:
+        raise ForgeUnavailable(f"forge CLI not found on PATH: {exc}") from exc
+    except OSError as exc:
+        raise ForgeUnavailable(f"forge queue run failed to spawn: {exc}") from exc
+
+    # Give the runner half a second to fail fast (bad args, missing project).
+    time.sleep(0.5)
+    if proc.poll() is not None and proc.returncode != 0:
+        raise ForgeUnavailable(
+            f"forge queue run exited with code {proc.returncode}"
+        )
+    logger.info(
+        "forge queue run started for %s (pid=%d) — detached", project_path, proc.pid
+    )
 
 
 # ── high-level entry ───────────────────────────────────────────────────────────

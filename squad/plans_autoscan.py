@@ -1,22 +1,27 @@
-"""Helpers backing the ``{project}/plans/<subject>/`` auto-scan.
+"""Explicit-path auto-scan for ``{project}/plans/…`` mentions in the idea.
 
-Pure building blocks:
+Design principle : zero guesswork. The user writes the path of the
+folder or file they want Squad to import as part of their idea, and
+the parser extracts exactly what is mentioned — nothing else. This
+replaces the earlier token-matching behaviour which could collide with
+any word of the idea that happened to match a folder name under
+``plans/``.
 
-* :func:`discover_plans_subfolder` — picks a `plans/<token>/` directory
-  under ``project_path`` based on tokens extracted from the idea, reusing
-  exactly the tokenisation logic of ``slack_service.discover_project_path``.
-* :func:`inventory_plan_folder` — a non-recursive listing of the direct
-  files in that folder, filtering to the text extensions eligible for the
-  cumulative context (``.md``, ``.txt``, ``.csv``) and capping the set.
+Accepted patterns in the idea :
 
-Shared orchestration:
+* ``plans/<name>`` → imports every eligible direct file from that
+  folder (``.md`` / ``.txt`` / ``.csv``, non-recursive, capped).
+* ``plans/<name>/`` → same thing; trailing slash tolerated.
+* ``plans/<name>/<file>.ext`` → imports just that single file (if its
+  extension is in :data:`SCOPED_EXTENSIONS`).
 
-* :func:`autoscan_and_import_plans` — composes the two helpers above with
-  :func:`squad.attachment_service.import_local_attachment` so both the
-  Slack handler and the CLI entrypoint can pre-load locally prepared
-  briefs into the session just before ``run_pipeline(...)``. The helper
-  deliberately owns no user-facing output (no Slack post, no
-  ``click.echo``) — it logs and returns a structured result.
+Punctuation that normally terminates a sentence (``,;.:)!?"'``) is
+stripped from the end of each match so the path doesn't eat the
+punctuation that follows it in French prose.
+
+Shared orchestration lives in :func:`autoscan_and_import_plans` so the
+Slack handler and the CLI entry point call the exact same code path
+and deliver the same messages to the user.
 """
 
 from __future__ import annotations
@@ -35,9 +40,13 @@ logger = logging.getLogger(__name__)
 # Extensions eligible for the cumulative context at scoping time.
 SCOPED_EXTENSIONS: tuple[str, ...] = ("md", "txt", "csv")
 
-# Same token shape as ``slack_service.discover_project_path``: lowercase,
-# starts with [a-z0-9], then [a-z0-9_-] of total length >= 3.
-_TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9\-_]{2,}")
+# Capture any ``plans/…`` path mentioned in the idea. Boundary on the
+# left: not preceded by a word char or another slash so we don't catch
+# ``some/other/plans/...`` nested paths or stick to the previous word.
+_PATH_RE = re.compile(r"(?<![\w/])(plans/[A-Za-z0-9._\-/]+)")
+
+# Trailing punctuation to strip off each match.
+_TRAILING_PUNCT = ".,;:)!?\"'"
 
 
 @dataclass
@@ -47,34 +56,6 @@ class PlanFolderInventory:
     folder: Path
     files: list[Path] = field(default_factory=list)
     ignored_count: int = 0
-
-
-def discover_plans_subfolder(idea: str, project_path: Path) -> Path | None:
-    """Return ``project_path/plans/<token>/`` when a token from ``idea`` matches.
-
-    Longest directory name wins; alphabetical order breaks ties so the
-    result is deterministic. Returns ``None`` when ``plans/`` is missing,
-    the idea yields no usable tokens, or no direct sub-directory of
-    ``plans/`` matches one of them.
-    """
-    plans_dir = project_path / "plans"
-    if not plans_dir.is_dir():
-        return None
-    try:
-        candidates = [p for p in plans_dir.iterdir() if p.is_dir() and not p.name.startswith(".")]
-    except OSError:
-        return None
-
-    tokens = {t for t in _TOKEN_RE.findall(idea.lower()) if len(t) >= 3}
-    if not tokens:
-        return None
-
-    matches = [p for p in candidates if p.name.lower() in tokens]
-    if not matches:
-        return None
-
-    matches.sort(key=lambda p: (-len(p.name), p.name))
-    return matches[0]
 
 
 def inventory_plan_folder(folder: Path, *, max_files: int = 10) -> PlanFolderInventory:
@@ -116,22 +97,50 @@ def inventory_plan_folder(folder: Path, *, max_files: int = 10) -> PlanFolderInv
     return inventory
 
 
+def extract_plan_paths_from_idea(idea: str, project_path: Path) -> list[Path]:
+    """Extract every ``plans/…`` path mentioned in ``idea`` as an absolute path.
+
+    Each match is resolved against ``project_path``. Directories are
+    kept as directories (the caller inventories them); single files are
+    kept only when their extension is in :data:`SCOPED_EXTENSIONS`.
+    Duplicates are collapsed. Paths that do not resolve to an existing
+    file or directory are silently dropped — they are typos the user
+    can fix without triggering a noisy error.
+    """
+    seen: set[str] = set()
+    resolved: list[Path] = []
+    for raw in _PATH_RE.findall(idea):
+        cleaned = raw.rstrip(_TRAILING_PUNCT).rstrip("/")
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        candidate = (project_path / cleaned).resolve()
+        if candidate.is_dir():
+            resolved.append(candidate)
+            continue
+        if candidate.is_file():
+            ext = candidate.suffix.lstrip(".").lower()
+            if ext in SCOPED_EXTENSIONS:
+                resolved.append(candidate)
+    return resolved
+
+
 # ── shared orchestration ──────────────────────────────────────────────────────
 
 
 @dataclass
 class AutoScanResult:
-    """Outcome of a ``plans/<subject>/`` auto-scan pass.
+    """Outcome of a ``plans/…`` auto-scan pass.
 
     ``enabled`` reflects the effective decision after considering the
     explicit override and the ``pipeline.project_plans_autoscan`` config
-    key. ``folder`` is the matched subfolder (or ``None`` when the scan
-    was disabled or nothing matched). ``imported`` holds the
+    key. ``folders`` lists the folders that were inventoried (empty
+    when only single files were mentioned). ``imported`` holds the
     :class:`AttachmentMeta` rows produced by successful imports.
     """
 
     enabled: bool
-    folder: Path | None = None
+    folders: list[Path] = field(default_factory=list)
     imported_count: int = 0
     rejected_count: int = 0
     ignored_count: int = 0
@@ -146,18 +155,18 @@ def autoscan_and_import_plans(
     enabled: bool | None = None,
     max_files: int = 10,
 ) -> AutoScanResult:
-    """Discover, inventory and import files from ``{project}/plans/<subject>/``.
+    """Extract explicit ``plans/…`` paths from ``idea`` and import them.
 
-    Loads the merged project config, resolves the effective enabled flag
-    (explicit override wins, otherwise reads
-    ``pipeline.project_plans_autoscan``, defaulting to ``True`` when the
-    key is absent), then delegates per-file import to
+    Loads the merged project config, resolves the effective enabled
+    flag (explicit override wins, otherwise reads
+    ``pipeline.project_plans_autoscan``, defaulting to ``True`` when
+    the key is absent), then delegates per-file import to
     :func:`import_local_attachment` so the attachment policy (allowed
-    extensions, per-file size, cumulative quota) is applied exactly once,
-    from the project config.
+    extensions, per-file size, cumulative quota) is applied from the
+    project config.
 
-    A single-file :class:`AttachmentError` is logged and counted as
-    ``rejected_count``; the scan continues with the remaining files.
+    Single-file :class:`AttachmentError` are logged and counted as
+    ``rejected_count`` ; the scan continues with the remaining files.
     """
     project_config = load_config(session.project_path)
 
@@ -174,25 +183,39 @@ def autoscan_and_import_plans(
         return AutoScanResult(enabled=False)
 
     project_path = Path(session.project_path)
-    folder = discover_plans_subfolder(idea, project_path)
-    if folder is None:
+    resolved = extract_plan_paths_from_idea(idea, project_path)
+    if not resolved:
         logger.info(
-            "plans auto-scan: no matching plans/<subject>/ folder under %s",
+            "plans auto-scan: no explicit plans/… path found in idea "
+            "(project=%s)",
             project_path,
         )
         return AutoScanResult(enabled=True)
 
-    inventory = inventory_plan_folder(folder, max_files=max_files)
-    logger.info(
-        "plans auto-scan matched %s (%d eligible file(s), %d ignored)",
-        folder,
-        len(inventory.files),
-        inventory.ignored_count,
-    )
+    # Turn every entry into a concrete list of files to import, logging
+    # each source as we go so the serve.log reads like a narrative.
+    files_to_import: list[Path] = []
+    folders_matched: list[Path] = []
+    ignored = 0
+    for entry in resolved:
+        if entry.is_dir():
+            inv = inventory_plan_folder(entry, max_files=max_files)
+            folders_matched.append(entry)
+            logger.info(
+                "plans auto-scan matched folder %s (%d eligible file(s), %d ignored)",
+                entry,
+                len(inv.files),
+                inv.ignored_count,
+            )
+            ignored += inv.ignored_count
+            files_to_import.extend(inv.files)
+        else:
+            logger.info("plans auto-scan matched file %s", entry)
+            files_to_import.append(entry)
 
     imported: list[AttachmentMeta] = []
     rejected = 0
-    for src in inventory.files:
+    for src in files_to_import:
         try:
             meta = import_local_attachment(
                 session.id,
@@ -206,18 +229,18 @@ def autoscan_and_import_plans(
             logger.warning("plans auto-scan rejected %s: %s", src, exc)
 
     logger.info(
-        "plans auto-scan done: imported=%d rejected=%d ignored=%d from %s",
+        "plans auto-scan done: imported=%d rejected=%d ignored=%d (folders=%d)",
         len(imported),
         rejected,
-        inventory.ignored_count,
-        folder,
+        ignored,
+        len(folders_matched),
     )
 
     return AutoScanResult(
         enabled=True,
-        folder=folder,
+        folders=folders_matched,
         imported_count=len(imported),
         rejected_count=rejected,
-        ignored_count=inventory.ignored_count,
+        ignored_count=ignored,
         imported=imported,
     )

@@ -122,18 +122,20 @@ def _run_plans_autoscan_cli(
     except Exception as exc:  # defensive — auto-scan must never abort the run
         click.echo(f"Auto-scan : erreur — {exc}")
         return
-    if not result.enabled or result.folder is None:
+    if not result.enabled:
         return
     total = result.imported_count + result.rejected_count + result.ignored_count
     if total == 0:
-        click.echo(
-            f"Auto-scan : dossier `{result.folder}` — aucun fichier éligible."
-        )
-        return
+        return  # silent : no plans/ path mentioned in the idea
+    source_display = (
+        ", ".join(str(f) for f in result.folders)
+        if result.folders
+        else "fichiers explicites"
+    )
     click.echo(
         f"Auto-scan : {result.imported_count} importé(s), "
         f"{result.rejected_count} rejeté(s), {result.ignored_count} ignoré(s) "
-        f"depuis `{result.folder}`."
+        f"depuis {source_display}."
     )
 
 

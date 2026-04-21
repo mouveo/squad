@@ -1051,7 +1051,7 @@ class TestStartAutoScan:
         (plans / "brief.md").write_text("# brief")
         (plans / "bench.md").write_text("# bench")
 
-        result = _run(runner, db_path, "start", str(project_dir), "Lancer le sujet whaou")
+        result = _run(runner, db_path, "start", str(project_dir), "Lancer le sujet whaou — voir plans/whaou")
         assert result.exit_code == 0
         sessions = list_active_sessions(db_path=db_path)
         attachments = Path(sessions[0].workspace_path) / "attachments"
@@ -1065,7 +1065,7 @@ class TestStartAutoScan:
         (plans / "a.md").write_text("a")
         (plans / "b.md").write_text("b")
 
-        result = _run(runner, db_path, "start", str(project_dir), "Lancer le sujet whaou")
+        result = _run(runner, db_path, "start", str(project_dir), "Lancer le sujet whaou — voir plans/whaou")
         assert result.exit_code == 0
         assert "Auto-scan : 2 importé(s)" in result.output
         assert "plans/whaou" in result.output or "whaou" in result.output
@@ -1089,7 +1089,7 @@ class TestStartAutoScan:
             db_path,
             "start",
             str(project_dir),
-            "Lancer le sujet whaou",
+            "Lancer le sujet whaou — voir plans/whaou",
             "--no-plans-autoscan",
         )
         assert result.exit_code == 0
@@ -1109,7 +1109,7 @@ class TestStartAutoScan:
         cfg.parent.mkdir(parents=True, exist_ok=True)
         cfg.write_text("pipeline:\n  project_plans_autoscan: false\n")
 
-        result = _run(runner, db_path, "start", str(project_dir), "Lancer le sujet whaou")
+        result = _run(runner, db_path, "start", str(project_dir), "Lancer le sujet whaou — voir plans/whaou")
         assert result.exit_code == 0
         # Silent when the config key is false (no folder-level message)
         assert "Auto-scan" not in result.output
@@ -1139,7 +1139,7 @@ class TestStartAutoScan:
         ):
             result = runner.invoke(
                 cli,
-                ["start", str(project_dir), "Lancer le sujet whaou"],
+                ["start", str(project_dir), "Lancer le sujet whaou — voir plans/whaou"],
                 catch_exceptions=False,
             )
         assert result.exit_code == 0
@@ -1157,7 +1157,7 @@ class TestRunAutoScan:
         # In approval mode, after run_pipeline returns status stays draft,
         # so _drive_interactive_questions sees the session not interviewing
         # and returns immediately. No prompting needed.
-        result = _run(runner, db_path, "run", str(project_dir), "Lancer le sujet whaou")
+        result = _run(runner, db_path, "run", str(project_dir), "Lancer le sujet whaou — voir plans/whaou")
         assert result.exit_code == 0
         sessions = list_active_sessions(db_path=db_path)
         attachments = Path(sessions[0].workspace_path) / "attachments"
@@ -1175,7 +1175,7 @@ class TestRunAutoScan:
             db_path,
             "run",
             str(project_dir),
-            "Lancer le sujet whaou",
+            "Lancer le sujet whaou — voir plans/whaou",
             "--no-plans-autoscan",
         )
         assert result.exit_code == 0
@@ -1191,7 +1191,7 @@ class TestRunAutoScan:
         plans.mkdir(parents=True)
         (plans / "a.md").write_text("a")
 
-        result = _run(runner, db_path, "run", str(project_dir), "Lancer le sujet whaou")
+        result = _run(runner, db_path, "run", str(project_dir), "Lancer le sujet whaou — voir plans/whaou")
         assert result.exit_code == 0
         assert "Auto-scan : 1 importé(s)" in result.output
 
