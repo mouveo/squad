@@ -1,12 +1,15 @@
 # Squad
 
+> **Migration v2 en cours** — voir [`docs/v1-archive.md`](docs/v1-archive.md)
+> pour l'inventaire des agents et phases v1 retirés et la commande de
+> récupération via le tag `squad-v1-final`.
+
 **Équipe produit IA** — décris une idée, reçois des plans Forge exécutables.
 
-Squad orchestre 10 agents IA spécialisés (PM, UX Designer, Architect,
-Security, Growth, Data Analyst, Customer Success, Delivery, Sales,
-AI Lead) qui instruisent un sujet produit en 6 phases — cadrage, état
-des lieux, benchmark, conception, challenge, synthèse — puis
-matérialisent la décision en plans Forge prêts à exécuter.
+Squad orchestre 3 agents IA runtime — **PM, UX Designer, Architect** —
+qui instruisent un sujet produit en 6 phases — cadrage, état des lieux,
+benchmark, conception, challenge, synthèse — puis matérialisent la
+décision en plans Forge prêts à exécuter.
 
 Le pilotage se fait en ligne de commande et via Slack. Un dashboard
 local optionnel (Streamlit, lancé par `squad dashboard`) permet aussi
@@ -151,7 +154,8 @@ Voir `docs/ARCHITECTURE.md` pour le contrat entre Squad et Forge.
   exemple complet (prompt + deepsearch + checkpoints).
 - `docs/TROUBLESHOOTING.md` — journal des bugs observés en conditions
   réelles et leurs contre-mesures.
-- `docs/AGENTS.md` — les 10 agents produit que Squad orchestre.
+- `docs/AGENTS.md` — les 3 agents produit runtime (PM, UX, Architect)
+  que Squad orchestre en v2.
 - `docs/ARCHITECTURE.md` — pipeline, DB, recovery, benchmark, génération.
 - `docs/TUNING.md` — décisions d'ajustement issues des validations manuelles.
 - `examples/` — sessions archivées (résumés et métriques uniquement).

@@ -33,13 +33,16 @@
 ```python
 PHASES = [
     "cadrage",         # PM
-    "etat_des_lieux",  # CS, Data, Sales, UX
+    "etat_des_lieux",  # UX
     "benchmark",       # Research (service)
-    "conception",      # UX, Architect, Growth, AI Lead
-    "challenge",       # Security, Delivery, Architect
+    "conception",      # UX, Architect
+    "challenge",       # Architect
     "synthese",        # PM
 ]
 ```
+
+> v2 retire 7 agents v1 du runtime ; l'inventaire et la commande de
+> récupération sont dans `docs/v1-archive.md` (tag `squad-v1-final`).
 
 Chaque phase est exécutée par `pipeline.run_phase`. Le cycle :
 
@@ -52,9 +55,9 @@ Chaque phase est exécutée par `pipeline.run_phase`. Le cycle :
 3. Si le contrat de la phase contient des questions pendantes (cas du
    PM en cadrage), la phase **pause** : statut → `interviewing`.
 4. Sinon, statut → `working` et on enchaîne.
-5. Après `challenge`, si Security / Delivery / Architect a produit des
-   blockers exploitables, `recovery.can_retry_conception` autorise
-   **un seul** retour en `conception` avec une instruction enrichie.
+5. Après `challenge`, si Architect a produit des blockers exploitables,
+   `recovery.can_retry_conception` autorise **un seul** retour en
+   `conception` avec une instruction enrichie.
 
 ## Exploration active
 
@@ -103,13 +106,6 @@ pour les agents markdown, et l'allowlist codée dans
 | Agent              | `--allowedTools` effectifs              |
 |--------------------|-----------------------------------------|
 | `pm`               | `Read`                                  |
-| `customer-success` | `Read`                                  |
-| `data`             | `Read`                                  |
-| `delivery`         | `Read`                                  |
-| `sales`            | `Read,WebSearch,WebFetch`               |
-| `security`         | `Read,WebSearch,WebFetch`               |
-| `growth`           | `Read,WebSearch,WebFetch`               |
-| `ai-lead`          | `Read,WebSearch,WebFetch`               |
 | `ux`               | `Read,WebSearch,WebFetch,Glob,LS,Grep`  |
 | `architect`        | `Read,WebSearch,WebFetch,Glob,LS,Grep`  |
 | `research`         | `Read,WebSearch,WebFetch` (via `research.py`) |
@@ -196,8 +192,8 @@ Le point de reprise dépend du statut :
 | `review`/`done`    | rien à reprendre |
 | `failed`           | reprend à la phase qui a échoué (idempotence DB requise) |
 
-Cas particulier : retour en `conception` après blockers Security /
-Delivery. `recovery.can_retry_conception` n'autorise **qu'un seul**
+Cas particulier : retour en `conception` après blockers Architect au
+challenge. `recovery.can_retry_conception` n'autorise **qu'un seul**
 retour, tracé en DB (`increment_challenge_retry_count`) — au-delà la
 session reste failed pour éviter les boucles infinies.
 

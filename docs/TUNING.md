@@ -18,7 +18,7 @@ une spec QA exhaustive.
 | État des lieux  | Lecture du code existant, identification correcte des briques en place. |
 | Benchmark       | Concurrents plausibles, sources citées, distinction faits / hypothèses. |
 | Conception      | Propositions concrètes et cohérentes avec le contexte produit. |
-| Challenge       | Risques réels identifiés sur sécurité, delivery, dette. |
+| Challenge       | Risques réels identifiés sur architecture, sécurité et dette technique. |
 | Synthèse        | Résumé décisionnel actionnable. |
 | Plans Forge     | Lots atomiques, dépendances claires, validation `validate_or_split` réussie. |
 

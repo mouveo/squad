@@ -134,11 +134,10 @@ depuis …` avant de démarrer le pipeline.
 | Fichier attaché | Message `:paperclip: Fichier <name> attaché (… octets)` dans le thread, OU log `file_shared received` dans serve.log puis `Attachment stored` | < 10s |
 | Classification sujet | `subject_type` et `research_depth` persistés en DB (sqlite check) | < 30s |
 | Phase Cadrage | `🎯 Phase : Cadrage` dans le thread | ~2 min |
-| Phase État des lieux | Message suivant + agents ux/customer-success/data/sales lancés en parallèle | 3-5 min |
-| Phase Ideation | Angles générés (au moins 3) — si `input_richness=rich`, `auto_pick` immédiat sans pause | 3-7 min |
+| Phase État des lieux | Message suivant, agent ux lancé avec exploration active sur sitavista | 3-5 min |
 | Phase Benchmark | Research exploite la deepsearch, **pas** de WebSearch redondant sur HubSpot/Pipedrive/Monday | 5-10 min |
-| Phase Conception | architect + ai-lead + growth + ux avec exploration active sur sitavista | 5-10 min |
-| Phase Challenge | security + delivery + architect | 10-20 min |
+| Phase Conception | ux + architect en parallèle avec exploration active sur sitavista | 5-10 min |
+| Phase Challenge | architect produit le contrat blockers (challenge séquentiel mono-agent en v2) | 5-10 min |
 | Phase Synthèse | PM produit le markdown final avec bloc JSON de contrat | 5-10 min |
 | Plans générés | Messages dans le thread avec résumé + fichier `.md` uploadé | < 30s |
 | Total | | ~45-75 min |

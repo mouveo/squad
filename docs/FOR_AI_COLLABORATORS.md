@@ -17,8 +17,9 @@ Entrée principale : **Slack** (le workspace `mouveo`, channel
 alternative : **CLI** (`squad run <projet> "<idée>"`) pour les
 workflows scriptés.
 
-Le pipeline enchaîne 7 phases : cadrage → état des lieux → idéation
-→ benchmark → conception → challenge → synthèse.
+Le pipeline enchaîne 6 phases : cadrage → état des lieux → benchmark
+→ conception → challenge → synthèse. Trois agents runtime portent ces
+phases (PM, UX, Architect), plus le service Research pour le benchmark.
 
 Dashboard de suivi : `http://localhost:8501` (lancé par
 `squad dashboard`).
@@ -112,12 +113,10 @@ chaque phase aval.
 
 Squad calcule un score `input_richness` en début de pipeline. Quand
 le score est `rich` (idée > 500 chars ET/OU attachment texte > 3000
-chars), Squad :
+chars), Squad ajuste le prompt benchmark :
 
-- Force `auto_pick` à la phase idéation (pas de pause pour demander
-  à l'utilisateur de choisir un angle).
-- Ajuste le prompt benchmark : *"L'utilisateur a fourni du contexte,
-  combles les angles morts plutôt que de refaire la recherche."*
+> *"L'utilisateur a fourni du contexte, comble les angles morts plutôt
+> que de refaire la recherche."*
 
 C'est exactement ce qu'on veut quand le PO a déjà fourni une
 deepsearch détaillée.

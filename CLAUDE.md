@@ -5,7 +5,7 @@
 
 ## Projet
 
-Squad est un orchestrateur multi-agents produit. Il prend une idée en entrée, la fait instruire par une équipe d'agents IA spécialisés (PM, UX, Architect, Security, etc.), et produit des plans exécutables par Forge.
+Squad est un orchestrateur multi-agents produit. En v2, il fait instruire chaque idée par 3 agents runtime — **PM, UX, Architect** — sur 6 phases (cadrage, état des lieux, benchmark, conception, challenge, synthèse), puis produit des plans exécutables par Forge. Le markdown `agents/security.md` est conservé temporairement comme source pour une checklist de challenge intégrée mais n'est **plus exécuté** dans le pipeline (voir `docs/v1-archive.md` pour l'historique v1).
 
 Squad est un outil CLI Python destiné à être utilisé par un product owner technique. Il communique avec l'utilisateur via le terminal et Slack, et propose un dashboard local optionnel (Streamlit, lancé par `squad dashboard`) pour consulter les sessions et piloter la review des plans — pas d'interface web distante ni de serveur applicatif partagé.
 
@@ -72,7 +72,7 @@ squad/
 - Fichiers : snake_case
 - Classes : PascalCase
 - Fonctions et variables : snake_case
-- Agents markdown : kebab-case (`customer-success.md`)
+- Agents markdown : kebab-case (ex. `architect.md`)
 - Plans Forge générés : `plan-N-titre-slug.md`
 
 ### Tests
