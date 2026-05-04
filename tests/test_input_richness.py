@@ -171,8 +171,8 @@ class TestRecomputedAtCallTime:
             "x" * (TEXT_ATTACHMENT_RICH_CHARS + 7000),
         )
 
-        # A subsequent score call (e.g. on entry into the ideation phase)
-        # picks the file up without any explicit cache invalidation.
+        # A subsequent score call picks the file up without any explicit
+        # cache invalidation.
         assert score_input_richness(s.id, db_path=db_path) == "rich"
 
 
@@ -210,8 +210,7 @@ class TestUnknownSession:
             score_input_richness("ghost", db_path=db_path)
 
 
-# Pipeline integration tests covered the legacy ideation entry hook
-# (auto-rescore on entry into the ideation phase). The ideation phase
-# was removed in v2 (see plan squad-v2-lot-1) so these tests no longer
-# apply; ``score_input_richness`` is still exercised via the standalone
-# unit tests above.
+# Migration note: pipeline integration tests covering the v1 auto-rescore
+# entry hook were removed when the corresponding phase was retired in v2
+# (see plan squad-v2-lot-1). ``score_input_richness`` is still exercised
+# by the standalone unit tests above and consumed by ``research.py``.

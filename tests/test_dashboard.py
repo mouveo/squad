@@ -316,12 +316,12 @@ def test_get_session_detail_aggregates_phases_with_retries(tmp_path: Path) -> No
     mark_phase_skipped(
         sess.id, PHASE_ETAT_DES_LIEUX, "light mode", db_path=db_path
     )
-    # Phase 3 — ideation: retried twice, with outputs on both attempts
+    # Phase 4 — conception: retried twice, with outputs on both attempts
     increment_phase_attempt(sess.id, PHASE_CONCEPTION, db_path=db_path)
     create_phase_output(
         session_id=sess.id,
         phase=PHASE_CONCEPTION,
-        agent="ideation",
+        agent="architect",
         output="first",
         file_path=str(workspace / "i1.md"),
         duration_seconds=8.0,
@@ -333,7 +333,7 @@ def test_get_session_detail_aggregates_phases_with_retries(tmp_path: Path) -> No
     create_phase_output(
         session_id=sess.id,
         phase=PHASE_CONCEPTION,
-        agent="ideation",
+        agent="architect",
         output="second",
         file_path=str(workspace / "i2.md"),
         duration_seconds=9.0,
@@ -365,13 +365,13 @@ def test_get_session_detail_aggregates_phases_with_retries(tmp_path: Path) -> No
     assert etat.state == PHASE_STATE_SKIPPED
     assert etat.skip_reason == "light mode"
 
-    # ideation → done with TWO distinct attempts (retry not flattened)
-    ideation = by_id[PHASE_CONCEPTION]
-    assert ideation.state == PHASE_STATE_DONE
-    assert ideation.attempts_count == 2
-    assert [a.attempt for a in ideation.attempts] == [1, 2]
-    assert len(ideation.attempts[0].outputs) == 1
-    assert len(ideation.attempts[1].outputs) == 1
+    # conception → done with TWO distinct attempts (retry not flattened)
+    conception = by_id[PHASE_CONCEPTION]
+    assert conception.state == PHASE_STATE_DONE
+    assert conception.attempts_count == 2
+    assert [a.attempt for a in conception.attempts] == [1, 2]
+    assert len(conception.attempts[0].outputs) == 1
+    assert len(conception.attempts[1].outputs) == 1
 
     # benchmark → running (current phase) with no output yet
     benchmark = by_id[PHASE_BENCHMARK]

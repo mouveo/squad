@@ -58,7 +58,7 @@ def session(db_path: Path, project_dir: Path, tmp_path: Path):
         title="Test",
         project_path=str(project_dir),
         workspace_path=str(tmp_path / "ws"),
-        idea="Build a B2B SaaS CRM for sales teams",
+        idea="Build a B2B SaaS analytics platform for revenue teams",
         db_path=db_path,
     )
     create_workspace(s)

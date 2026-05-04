@@ -336,14 +336,14 @@ class TestSessionProfileFields:
         s = self._make(
             subject_type="b2b_saas",
             research_depth=RESEARCH_DEPTH_DEEP,
-            agents_by_phase={"etat_des_lieux": ["sales", "ux"]},
+            agents_by_phase={"etat_des_lieux": ["ux"]},
             phase_attempts={"cadrage": 2},
             challenge_retry_count=1,
             skipped_phases={"benchmark": "light"},
         )
         assert s.subject_type == "b2b_saas"
         assert s.research_depth == RESEARCH_DEPTH_DEEP
-        assert s.agents_by_phase == {"etat_des_lieux": ["sales", "ux"]}
+        assert s.agents_by_phase == {"etat_des_lieux": ["ux"]}
         assert s.phase_attempts == {"cadrage": 2}
         assert s.challenge_retry_count == 1
         assert s.skipped_phases == {"benchmark": "light"}
@@ -358,7 +358,7 @@ class TestSubjectProfile:
         p = SubjectProfile(
             subject_type="ai_product",
             research_depth=RESEARCH_DEPTH_NORMAL,
-            agents_by_phase={"conception": ["ai-lead", "architect"]},
+            agents_by_phase={"conception": ["ux", "architect"]},
         )
         assert p.subject_type == "ai_product"
         assert p.research_depth == RESEARCH_DEPTH_NORMAL
@@ -524,10 +524,13 @@ class TestAttachmentMeta:
         assert m.uploaded_at is not None
 
 
-# ── Ideation (Plan 6 — LOT 1) ─────────────────────────────────────────────────
+# ── Legacy passive fields kept for DB compat with pre-v2 sessions ────────────
+# These cover dataclass surface kept passive after the v1 ideation phase
+# was removed (see plan squad-v2-lot-1). No runtime path writes them in v2;
+# the tests only assert the schema still round-trips for archived sessions.
 
 
-class TestSessionIdeationFields:
+class TestSessionLegacyPassiveFields:
     def _make(self, **kwargs) -> Session:
         defaults = dict(
             id="sess-1",
@@ -538,13 +541,13 @@ class TestSessionIdeationFields:
         )
         return Session(**{**defaults, **kwargs})
 
-    def test_ideation_defaults(self):
+    def test_passive_fields_default_to_none(self):
         s = self._make()
         assert s.input_richness is None
         assert s.selected_angle_idx is None
         assert s.benchmark_all_angles is False
 
-    def test_ideation_fields_roundtrip(self):
+    def test_passive_fields_roundtrip(self):
         s = self._make(
             input_richness="rich",
             selected_angle_idx=2,
@@ -555,7 +558,9 @@ class TestSessionIdeationFields:
         assert s.benchmark_all_angles is True
 
 
-class TestIdeationAngle:
+class TestLegacyAngleDataclass:
+    """The IdeationAngle dataclass is kept for DB compat (see lot 4 of v2)."""
+
     def test_default_created_at_is_iso_string(self):
         a = IdeationAngle(
             session_id="sess-1",

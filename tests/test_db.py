@@ -333,16 +333,16 @@ class TestSessionProfile:
             subject_type="ai_product",
             research_depth=RESEARCH_DEPTH_DEEP,
             agents_by_phase={
-                "etat_des_lieux": ["ux", "data"],
-                "conception": ["ai-lead", "architect"],
+                "etat_des_lieux": ["ux"],
+                "conception": ["ux", "architect"],
             },
             db_path=db_path,
         )
         fetched = get_session(s.id, db_path)
         assert fetched.subject_type == "ai_product"
         assert fetched.research_depth == RESEARCH_DEPTH_DEEP
-        assert fetched.agents_by_phase["etat_des_lieux"] == ["ux", "data"]
-        assert fetched.agents_by_phase["conception"] == ["ai-lead", "architect"]
+        assert fetched.agents_by_phase["etat_des_lieux"] == ["ux"]
+        assert fetched.agents_by_phase["conception"] == ["ux", "architect"]
 
     def test_mark_phase_skipped(self, db_path: Path):
         s = _session(db_path)

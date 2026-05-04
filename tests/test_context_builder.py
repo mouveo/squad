@@ -511,8 +511,8 @@ class TestExtractChallengeConstraints:
             '```json\n{"blockers": [{"id": "b1", "severity": "major", "constraint": "same"}]}\n```'
         )
         outputs = [
-            _make_phase_output(PHASE_CHALLENGE, "security", body),
-            _make_phase_output(PHASE_CHALLENGE, "delivery", body),
+            _make_phase_output(PHASE_CHALLENGE, "architect", body),
+            _make_phase_output(PHASE_CHALLENGE, "architect", body, attempt=2),
         ]
         assert len(extract_challenge_constraints(outputs)) == 1
 
