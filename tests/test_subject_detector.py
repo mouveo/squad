@@ -106,6 +106,11 @@ class TestInspectProject:
 # ── derive_signals ─────────────────────────────────────────────────────────────
 
 
+_RETIRED_AGENTS = frozenset(
+    {"sales", "data", "customer-success", "delivery", "growth", "ai-lead", "ideation"}
+)
+
+
 class TestDeriveSignals:
     def test_b2b_signal(self):
         assert "b2b" in derive_signals("Build a B2B SaaS", {})
@@ -113,29 +118,14 @@ class TestDeriveSignals:
     def test_ai_signal(self):
         assert "ai" in derive_signals("An LLM-powered assistant with RAG", {})
 
-    def test_onboarding_signal(self):
-        assert "onboarding" in derive_signals("Rework the signup onboarding flow", {})
-
     def test_pricing_signal(self):
         assert "pricing" in derive_signals("A new Stripe checkout pricing page", {})
 
     def test_integration_signal(self):
         assert "integration" in derive_signals("Add a webhook integration", {})
 
-    def test_data_signal(self):
-        assert "data" in derive_signals("Dashboard for analytics and metrics", {})
-
-    def test_security_signal(self):
-        assert "security" in derive_signals("Add SSO authentication and GDPR compliance", {})
-
     def test_growth_signal(self):
         assert "growth" in derive_signals("Optimise the funnel conversion and retention", {})
-
-    def test_sales_signal(self):
-        assert "sales" in derive_signals("A CRM tool for the sales team and leads", {})
-
-    def test_customer_success_signal(self):
-        assert "customer_success" in derive_signals("A helpdesk ticket tool to reduce churn", {})
 
     def test_signals_pick_from_inspection(self):
         signals = derive_signals("small idea", {"CLAUDE.md": "multi-tenant compliance"})
@@ -144,54 +134,43 @@ class TestDeriveSignals:
     def test_no_false_positive_on_empty(self):
         assert derive_signals("generic idea", {}) == set()
 
+    def test_retired_signals_no_longer_emitted(self):
+        """Signals that only fed retired agents must not appear anymore."""
+        sample = (
+            "A CRM helpdesk with sales leads, churn analytics dashboard, "
+            "SSO authentication and onboarding signup."
+        )
+        assert derive_signals(sample, {}) <= {"b2b", "ai", "pricing", "integration", "growth"}
+
 
 # ── default_agents_for_signals ─────────────────────────────────────────────────
 
 
 class TestAgentSelectionRules:
-    def test_sales_signal_adds_sales_agent(self):
-        agents = default_agents_for_signals({"sales"})
-        assert "sales" in agents[PHASE_ETAT_DES_LIEUX]
+    """Agent composition is fixed in v2 — no signal must reintroduce a retired agent."""
 
-    def test_b2b_signal_also_adds_sales(self):
-        agents = default_agents_for_signals({"b2b"})
-        assert "sales" in agents[PHASE_ETAT_DES_LIEUX]
-
-    def test_data_signal_adds_data_agent(self):
-        agents = default_agents_for_signals({"data"})
-        assert "data" in agents[PHASE_ETAT_DES_LIEUX]
-
-    def test_customer_success_adds_cs_agent(self):
-        agents = default_agents_for_signals({"customer_success"})
-        assert "customer-success" in agents[PHASE_ETAT_DES_LIEUX]
-
-    def test_onboarding_adds_cs_agent(self):
-        agents = default_agents_for_signals({"onboarding"})
-        assert "customer-success" in agents[PHASE_ETAT_DES_LIEUX]
-
-    def test_ai_signal_adds_ai_lead_in_conception(self):
-        agents = default_agents_for_signals({"ai"})
-        assert "ai-lead" in agents[PHASE_CONCEPTION]
-
-    def test_growth_signal_adds_growth_in_conception(self):
-        agents = default_agents_for_signals({"growth"})
-        assert "growth" in agents[PHASE_CONCEPTION]
-
-    def test_security_signal_does_not_add_finops(self):
-        agents = default_agents_for_signals({"security"})
-        assert "finops" not in agents[PHASE_CHALLENGE]
-
-    def test_challenge_always_has_security_delivery_architect(self):
+    def test_returns_v2_fixed_map(self):
         agents = default_agents_for_signals(set())
-        assert set(agents[PHASE_CHALLENGE]) == {"security", "delivery", "architect"}
+        assert agents[PHASE_ETAT_DES_LIEUX] == ["ux"]
+        assert agents[PHASE_CONCEPTION] == ["ux", "architect"]
+        assert agents[PHASE_CHALLENGE] == ["architect"]
 
-    def test_etat_des_lieux_always_has_ux(self):
-        agents = default_agents_for_signals(set())
-        assert "ux" in agents[PHASE_ETAT_DES_LIEUX]
-
-    def test_conception_always_has_ux_and_architect(self):
-        agents = default_agents_for_signals(set())
-        assert {"ux", "architect"} <= set(agents[PHASE_CONCEPTION])
+    @pytest.mark.parametrize(
+        "signals",
+        [
+            set(),
+            {"b2b"},
+            {"ai"},
+            {"b2b", "ai", "pricing", "growth", "integration"},
+        ],
+    )
+    def test_no_retired_agent_ever_returned(self, signals):
+        agents = default_agents_for_signals(signals)
+        for phase, slugs in agents.items():
+            for slug in slugs:
+                assert slug not in _RETIRED_AGENTS, (
+                    f"{phase} returned retired agent {slug!r} for signals {signals!r}"
+                )
 
 
 # ── default_depth_for_signals ──────────────────────────────────────────────────
@@ -241,8 +220,10 @@ class TestHeuristicProfile:
         profile = heuristic_profile("A B2B LLM assistant with Stripe billing", {})
         assert profile.subject_type == "b2b_ai_product"
         assert profile.research_depth == RESEARCH_DEPTH_DEEP
-        assert "ai-lead" in profile.agents_by_phase[PHASE_CONCEPTION]
-        assert "sales" in profile.agents_by_phase[PHASE_ETAT_DES_LIEUX]
+        # v2 fixed agent map — never the retired ai-lead/sales picks.
+        assert profile.agents_by_phase[PHASE_CONCEPTION] == ["ux", "architect"]
+        assert profile.agents_by_phase[PHASE_ETAT_DES_LIEUX] == ["ux"]
+        assert profile.agents_by_phase[PHASE_CHALLENGE] == ["architect"]
 
 
 # ── detect_subject ─────────────────────────────────────────────────────────────
@@ -274,17 +255,33 @@ class TestDetectSubject:
         fake = {
             "subject_type": "internal_tool",
             "research_depth": "light",
-            "agents_by_phase": {
-                "etat_des_lieux": ["ux"],
-                "conception": ["ux", "architect"],
-                "challenge": ["security", "delivery", "architect"],
-            },
         }
         with patch("squad.subject_detector.run_task_json", return_value=fake):
             profile = detect_subject("internal tool", project_dir)
         assert profile.subject_type == "internal_tool"
         assert profile.research_depth == RESEARCH_DEPTH_LIGHT
-        assert profile.agents_by_phase["conception"] == ["ux", "architect"]
+        # The LLM no longer drives agent selection — v2 fixed map wins.
+        assert profile.agents_by_phase[PHASE_CONCEPTION] == ["ux", "architect"]
+        assert profile.agents_by_phase[PHASE_CHALLENGE] == ["architect"]
+
+    def test_llm_hallucinated_agents_are_ignored(self, project_dir):
+        """A Claude payload that lists retired agents must not leak through."""
+        fake = {
+            "subject_type": "b2b_saas",
+            "research_depth": "normal",
+            "agents_by_phase": {
+                "etat_des_lieux": ["customer-success", "sales", "data", "ux"],
+                "conception": ["ai-lead", "growth", "architect", "ux"],
+                "challenge": ["security", "delivery", "architect"],
+            },
+        }
+        with patch("squad.subject_detector.run_task_json", return_value=fake):
+            profile = detect_subject("idea", project_dir)
+        # Retired agents must not appear anywhere in the persisted map.
+        for slugs in profile.agents_by_phase.values():
+            for slug in slugs:
+                assert slug not in _RETIRED_AGENTS
+                assert slug != "security"
 
     def test_uses_light_model_for_classification(self, project_dir):
         fake = {
@@ -325,7 +322,11 @@ class TestDetectAndPersist:
         forced = SubjectProfile(
             subject_type="overridden",
             research_depth=RESEARCH_DEPTH_DEEP,
-            agents_by_phase={"challenge": ["security", "delivery", "architect"]},
+            agents_by_phase={
+                PHASE_ETAT_DES_LIEUX: ["ux"],
+                PHASE_CONCEPTION: ["ux", "architect"],
+                PHASE_CHALLENGE: ["architect"],
+            },
         )
         with patch("squad.subject_detector.detect_subject", return_value=forced):
             detect_and_persist(s.id, force=True, db_path=db_path)

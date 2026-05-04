@@ -1,16 +1,20 @@
-"""Subject detection — classifies the session subject and selects agents.
+"""Subject detection — classifies the session subject and picks research depth.
 
 Combines two inputs:
 
 * **Local inspection** of the target project (``CLAUDE.md``, ``pyproject.toml``,
   ``requirements*.txt``, ``package.json``, ``composer.json``) — gives the
-  detector deterministic signals (B2B, AI, onboarding, pricing, integration,
-  data, security, growth, sales, customer-success).
+  detector deterministic signals (B2B, AI, pricing, integration, growth).
 * **Claude classification** via ``run_task_json`` with the light model
   already declared in ``squad.executor``. Claude returns a JSON object
   validated against the ``SubjectProfile`` contract; on failure the
   detector falls back to the deterministic heuristic so the pipeline can
   always proceed.
+
+In v2 the agent composition per phase is fixed (pm/ux/architect — see
+``squad.phase_config``); the detector only contributes a label and a
+research depth. ``agents_by_phase`` returns the v2 fixed map so nothing
+in the pipeline ever invokes an agent that no longer exists.
 
 The detector persists the result once on the ``sessions`` row. Resume
 paths must call ``detect_and_persist(..., force=False)`` so the subject
@@ -64,17 +68,15 @@ _MANIFESTS: tuple[str, ...] = (
     "composer.json",
 )
 
-# Canonical signal identifiers
+# Canonical signal identifiers — only signals that drive ``subject_type``
+# or ``research_depth`` survive in v2; agent selection is fixed by
+# ``squad.phase_config`` so signals that only fed retired agents
+# (sales/data/customer-success/security/onboarding) were dropped.
 SIGNAL_B2B = "b2b"
 SIGNAL_AI = "ai"
-SIGNAL_ONBOARDING = "onboarding"
 SIGNAL_PRICING = "pricing"
 SIGNAL_INTEGRATION = "integration"
-SIGNAL_DATA = "data"
-SIGNAL_SECURITY = "security"
 SIGNAL_GROWTH = "growth"
-SIGNAL_SALES = "sales"
-SIGNAL_CUSTOMER_SUCCESS = "customer_success"
 
 # Keyword map used by derive_signals. Case-insensitive substring matching.
 _KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -92,7 +94,6 @@ _KEYWORDS: dict[str, tuple[str, ...]] = {
         "agent",
         "prompt",
     ),
-    SIGNAL_ONBOARDING: ("onboarding", "signup", "sign-up", "activation", "first-run"),
     SIGNAL_PRICING: (
         "pricing",
         "billing",
@@ -112,27 +113,6 @@ _KEYWORDS: dict[str, tuple[str, ...]] = {
         "third-party",
         "third party",
     ),
-    SIGNAL_DATA: (
-        "data",
-        "analytics",
-        "etl",
-        "pipeline",
-        "metrics",
-        "dashboard",
-        "warehouse",
-        "kpi",
-    ),
-    SIGNAL_SECURITY: (
-        "security",
-        "gdpr",
-        "rgpd",
-        "encryption",
-        "pii",
-        "auth",
-        "authentication",
-        "authorization",
-        "sso",
-    ),
     SIGNAL_GROWTH: (
         "growth",
         "acquisition",
@@ -143,8 +123,6 @@ _KEYWORDS: dict[str, tuple[str, ...]] = {
         "referral",
         "virality",
     ),
-    SIGNAL_SALES: ("sales", "lead", "crm", "prospect", "pipeline sales", "outbound"),
-    SIGNAL_CUSTOMER_SUCCESS: ("support", "success", "churn", "ticket", "helpdesk", "nps"),
 }
 
 
@@ -206,34 +184,19 @@ def derive_signals(idea: str, inspection: dict[str, str]) -> set[str]:
 
 
 def default_agents_for_signals(signals: set[str]) -> dict[str, list[str]]:
-    """Pick the variable-agent sets per phase from the detected signals.
+    """Return the v2 fixed agent map per phase.
 
-    The detector only overrides phases where signals matter. Phases whose
-    agents are fixed (cadrage/pm, synthese/pm, benchmark/research) are not
-    returned here — the pipeline falls back to ``phase_config`` defaults.
-    Challenge is always ``security + delivery + architect`` and is returned
-    explicitly to document the choice.
+    In v2 the agent composition is fully determined by
+    ``squad.phase_config`` and no longer depends on detected signals; the
+    helper still returns the map so the ``SubjectProfile`` round-trip
+    (DB persist / dashboard display) keeps a stable shape. ``signals``
+    is kept for signature compatibility but is intentionally ignored.
     """
-    etat: list[str] = ["ux"]
-    if {SIGNAL_SALES, SIGNAL_B2B} & signals:
-        etat.append("sales")
-    if {SIGNAL_DATA} & signals:
-        etat.append("data")
-    if {SIGNAL_CUSTOMER_SUCCESS, SIGNAL_ONBOARDING} & signals:
-        etat.append("customer-success")
-
-    conception: list[str] = ["ux", "architect"]
-    if SIGNAL_AI in signals:
-        conception.append("ai-lead")
-    if {SIGNAL_GROWTH, SIGNAL_PRICING, SIGNAL_ONBOARDING} & signals:
-        conception.append("growth")
-
-    challenge = ["security", "delivery", "architect"]
-
+    del signals  # v2: agent picks are fixed, no signal-driven branches
     return {
-        PHASE_ETAT_DES_LIEUX: _dedupe(etat),
-        PHASE_CONCEPTION: _dedupe(conception),
-        PHASE_CHALLENGE: challenge,
+        PHASE_ETAT_DES_LIEUX: ["ux"],
+        PHASE_CONCEPTION: ["ux", "architect"],
+        PHASE_CHALLENGE: ["architect"],
     }
 
 
@@ -259,7 +222,6 @@ def default_depth_for_signals(signals: set[str]) -> str:
         SIGNAL_PRICING,
         SIGNAL_GROWTH,
         SIGNAL_INTEGRATION,
-        SIGNAL_SALES,
     }
     hits = signals & market_signals
     if len(hits) >= 3:
@@ -300,8 +262,10 @@ def _build_classification_prompt(idea: str, inspection: dict[str, str], signals:
         or "(no manifests found)"
     )
     return (
-        "You are classifying a product idea to pick research depth and agent "
-        "composition for a multi-agent design pipeline.\n\n"
+        "You are classifying a product idea for a multi-agent design "
+        "pipeline. The agent composition is fixed by the runtime and is "
+        "not your decision — only return ``subject_type`` and "
+        "``research_depth``.\n\n"
         f"## Idea\n{idea}\n\n"
         f"## Deterministic signals\n{sorted(signals) or '(none)'}\n\n"
         f"## Local manifests\n{manifests}\n\n"
@@ -315,11 +279,6 @@ def _build_classification_prompt(idea: str, inspection: dict[str, str], signals:
         "integration + pricing, new segment + GTM). When in doubt or when "
         'the idea is short/under-specified, return "normal" — a shallow '
         "benchmark is always better than no benchmark.\n"
-        '- "agents_by_phase": object mapping phase id to an array of agent '
-        "slugs. Phases: etat_des_lieux (customer-success, data, sales, ux), "
-        "conception (ai-lead, architect, growth, ux), challenge "
-        "(security, delivery, architect). Only list agents that are truly "
-        "relevant to the idea.\n"
         "Respond with JSON only. No prose, no markdown fence."
     )
 
@@ -360,26 +319,21 @@ def _coerce_profile(
 
     Missing or invalid fields fall back to the deterministic heuristic
     result so the pipeline never stalls on a malformed Claude response.
+
+    ``agents_by_phase`` is intentionally ignored from the LLM payload —
+    in v2 the agent composition is fixed by ``squad.phase_config`` and a
+    hallucinated agent slug must never reach the executor. We always
+    return the deterministic v2 map.
     """
     subject_type = str(data.get("subject_type") or fallback.subject_type)
     depth = str(data.get("research_depth") or fallback.research_depth)
     if depth not in RESEARCH_DEPTHS:
         depth = fallback.research_depth
 
-    raw_agents = data.get("agents_by_phase") or {}
-    agents: dict[str, list[str]] = {}
-    if isinstance(raw_agents, dict):
-        for phase, value in raw_agents.items():
-            if not isinstance(value, list):
-                continue
-            agents[str(phase)] = _dedupe([str(a) for a in value if isinstance(a, str)])
-    if not agents:
-        agents = dict(fallback.agents_by_phase)
-
     return SubjectProfile(
         subject_type=subject_type,
         research_depth=depth,
-        agents_by_phase=agents,
+        agents_by_phase=dict(fallback.agents_by_phase),
         rationale=str(data.get("rationale") or fallback.rationale or ""),
     )
 

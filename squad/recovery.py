@@ -149,8 +149,8 @@ def build_retry_instruction(constraints: list[str]) -> str:
     if not constraints:
         return (
             "This is a retry after the challenge phase raised blocking issues. "
-            "Revisit the design and address the concerns surfaced by security, "
-            "delivery and architect."
+            "Revisit the design and address the concerns surfaced by the "
+            "architect during challenge."
         )
     bullets = "\n".join(f"- {c}" for c in constraints)
     return (
