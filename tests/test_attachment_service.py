@@ -9,7 +9,6 @@ import pytest
 from squad.attachment_service import (
     DEFAULT_ALLOWED_EXTENSIONS,
     DEFAULT_MAX_FILE_BYTES,
-    DEFAULT_MAX_TOTAL_BYTES,
     INLINE_TEXT_EXTENSIONS,
     AttachmentError,
     download_file,
@@ -19,7 +18,6 @@ from squad.attachment_service import (
     validate_attachment,
 )
 from squad.db import create_session, ensure_schema
-from squad.models import AttachmentMeta
 from squad.workspace import create_workspace
 
 

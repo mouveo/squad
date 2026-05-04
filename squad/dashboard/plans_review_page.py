@@ -27,7 +27,6 @@ from squad.forge_bridge import (
 )
 from squad.review_service import reject_session
 
-
 _TERMINAL_STATUSES = (STATUS_APPROVED, STATUS_QUEUED, STATUS_FAILED)
 
 

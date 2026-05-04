@@ -40,7 +40,6 @@ from squad.slack_service import (
     REVIEW_APPROVE_ACTION_ID,
     REVIEW_REJECT_ACTION_ID,
     REVIEW_REJECT_MODAL_ID,
-    REVIEW_STATE_APPROVED,
     REVIEW_STATE_QUEUED,
     REVIEW_STATE_REJECTED,
     SlackResolutionError,

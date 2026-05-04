@@ -9,7 +9,6 @@ import pytest
 from squad.db import (
     create_session,
     ensure_schema,
-    get_session,
 )
 from squad.input_richness import (
     CLAUDE_MD_RICH_CHARS,
@@ -18,7 +17,6 @@ from squad.input_richness import (
     TEXT_ATTACHMENT_RICH_CHARS,
     score_input_richness,
 )
-
 
 # ── fixtures ───────────────────────────────────────────────────────────────────
 

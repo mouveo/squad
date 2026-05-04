@@ -478,6 +478,8 @@ class TestFileShared:
 
 from squad.db import (  # noqa: E402
     answer_question as _answer_question,
+)
+from squad.db import (  # noqa: E402
     create_question,
     get_question,
     list_pending_questions,
@@ -677,7 +679,6 @@ class TestQuestionSubmission:
 from squad.constants import STATUS_FAILED, STATUS_QUEUED, STATUS_REVIEW  # noqa: E402
 from squad.db import (  # noqa: E402
     create_plan,
-    get_plan,
     update_plan_slack_message_ts,
     update_session_status,
 )

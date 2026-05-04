@@ -21,7 +21,6 @@ from squad.dashboard.data import (
     get_session_detail,
 )
 
-
 _STATE_BADGE: dict[str, str] = {
     PHASE_STATE_DONE: "✅ terminée",
     PHASE_STATE_RUNNING: "🟦 en cours",

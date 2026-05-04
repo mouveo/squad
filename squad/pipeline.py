@@ -23,10 +23,10 @@ records written to ``phase_outputs`` (reserved for agent deliverables).
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
 
 from squad.constants import (
     PHASE_BENCHMARK,
@@ -67,8 +67,6 @@ from squad.phase_config import (
     iter_phases,
     should_skip_phase,
 )
-from squad.research import run_research
-from squad.subject_detector import detect_and_persist
 from squad.phase_contracts import (
     ContractError,
     QuestionsContract,
@@ -87,6 +85,8 @@ from squad.recovery import (
     determine_resume_point,
     record_conception_retry,
 )
+from squad.research import run_research
+from squad.subject_detector import detect_and_persist
 from squad.workspace import write_pending_questions, write_phase_output
 
 # Type alias for the optional Slack/observer callback

@@ -14,9 +14,9 @@ from squad.constants import (
     PHASE_SYNTHESE,
 )
 from squad.context_builder import (
-    FINAL_TRUNCATION_MARKER,
     _RESEARCH_MAX_CHARS,
     _TARGET_CHARS,
+    FINAL_TRUNCATION_MARKER,
     _filter_latest_attempt,
     _get_answered_questions,
     build_cumulative_context,

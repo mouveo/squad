@@ -281,7 +281,7 @@ class TestSubmitSessionToForge:
 # ── approve_and_submit (LOT 5 — Plan 4) ───────────────────────────────────────
 
 
-from squad.constants import STATUS_APPROVED, STATUS_REVIEW  # noqa: E402
+from squad.constants import STATUS_REVIEW  # noqa: E402
 from squad.db import update_session_status  # noqa: E402
 from squad.forge_bridge import approve_and_submit  # noqa: E402
 

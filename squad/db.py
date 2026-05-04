@@ -780,7 +780,9 @@ def update_plan_slack_message_ts(
     db["plans"].update(plan_id, {"slack_message_ts": slack_message_ts})
 
 
-# ── ideation angles (Plan 6 — LOT 1) ──────────────────────────────────────────
+# ── Legacy passive: ideation angles (kept for v1-session DB compat) ───────────
+# The v2 pipeline (see plan squad-v2-lot-1) no longer writes these rows;
+# the helpers below keep the table readable for archived v1 sessions.
 
 
 def persist_ideation_angle(

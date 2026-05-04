@@ -221,7 +221,10 @@ class PipelineEvent:
             raise ValueError(f"Invalid pipeline event type: {self.type!r}")
 
 
-# ── Ideation angles (Plan 6 — LOT 1) ──────────────────────────────────────────
+# ── Legacy passive: ideation-angle dataclass (kept for v1-session DB compat) ──
+# The v2 pipeline (see plan squad-v2-lot-1) does not produce angles;
+# this dataclass remains so the kept ``ideation_angles`` table can still
+# round-trip through ``squad.db`` for archived v1 sessions.
 
 
 def _ideation_now() -> str:
@@ -230,7 +233,7 @@ def _ideation_now() -> str:
 
 @dataclass
 class IdeationAngle:
-    """One divergent angle produced by the ``ideation`` phase.
+    """One divergent angle produced by the legacy v1 ideation phase.
 
     Persisted in the ``ideation_angles`` table keyed on
     ``(session_id, idx)`` with ``idx`` 0-based. ``created_at`` is an

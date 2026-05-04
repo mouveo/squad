@@ -15,7 +15,6 @@ import streamlit as st
 from squad.constants import STATUS_LABELS
 from squad.dashboard.data import SessionRow, list_sessions_for_dashboard
 
-
 # Map status_tone (from constants.STATUS_TONES) to a markdown-friendly dot.
 # Kept here so the data layer stays free of visual concerns.
 _TONE_DOT: dict[str, str] = {

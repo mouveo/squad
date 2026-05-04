@@ -1,9 +1,9 @@
-"""Score session input richness as ``"sparse"`` or ``"rich"`` before ideation.
+"""Score session input richness as ``"sparse"`` or ``"rich"``.
 
-The classification gates the ideation strategy (LOT 5): when an input is
-``rich`` the pipeline tends to ``auto_pick`` an angle (Claude already has
-enough material), when it is ``sparse`` it lets the agent's recommendation
-stand and may ask the reviewer.
+Used by ``squad.research.build_research_prompt`` to flip the benchmark
+into "cover the gaps" mode when the user already provided substantial
+context (long idea, CLAUDE.md, deepsearch attachment) — saves a wasted
+generic research pass.
 
 Three signals feed the score:
 
@@ -18,10 +18,8 @@ Binary or non-decodable files are silently ignored: the goal is to
 detect signal, not parse every format. PDF attachments are intentionally
 excluded — no PDF parsing is introduced here.
 
-The scoring is recalculated on every entry into the ``ideation`` phase so
-attachments uploaded *after* session creation but before the phase runs
-are taken into account; the latest value is persisted via
-:func:`squad.db.update_input_richness`.
+The scoring can be recomputed at any time and the latest value is
+persisted via :func:`squad.db.update_input_richness`.
 """
 
 from __future__ import annotations
