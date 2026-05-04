@@ -1,5 +1,11 @@
 # Agent: Security
 
+> TODO(squad-v2-lot-2): convert to checklist
+>
+> Cet agent n'est plus exécuté comme agent runtime. Il est conservé
+> temporairement comme source de conversion en checklist de challenge
+> intégrée et sera supprimé après extraction.
+
 ## Identité
 - Rôle : Security Engineer
 - Phase d'intervention : challenge
