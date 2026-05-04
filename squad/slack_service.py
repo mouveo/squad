@@ -18,11 +18,10 @@ from pathlib import Path
 from sqlite_utils import Database
 
 from squad.config import get_global_db_path, get_project_state_dir, load_config
-from squad.constants import MODE_APPROVAL, PHASE_IDEATION, PHASE_LABELS, SESSION_MODES
+from squad.constants import MODE_APPROVAL, PHASE_LABELS, SESSION_MODES
 from squad.db import (
     _to_session,
     create_session,
-    list_ideation_angles,
     list_pending_questions,
     list_plans,
     update_plan_slack_message_ts,
@@ -35,7 +34,6 @@ from squad.models import (
     EVENT_REVIEW,
     EVENT_WORKING,
     GeneratedPlan,
-    IdeationAngle,
     PipelineEvent,
     Question,
     Session,
@@ -258,15 +256,6 @@ def format_pipeline_event(event: PipelineEvent) -> str:
             f"{stamp} · écoulé : {elapsed}"
         )
     if event.type == EVENT_INTERVIEWING:
-        # Ideation pauses wait for an angle selection, not for question
-        # answers — render the appropriate copy so reviewers don't see
-        # a misleading "0 question en attente".
-        if event.phase == PHASE_IDEATION:
-            return (
-                f":pause_button: *En attente du choix d'angle* — "
-                "sélectionnez un angle d'idéation pour reprendre.\n"
-                f"{stamp} · écoulé : {elapsed}"
-            )
         plural = "s" if event.pending_questions != 1 else ""
         return (
             f":pause_button: *En attente de réponses* — "
@@ -852,241 +841,3 @@ def update_review_message(
         logger.exception("Failed to chat_update review card for plan %s", plan.id)
 
 
-# ── Ideation angle review (LOT 6) ─────────────────────────────────────────────
-
-# Stable Block Kit action ids. The dynamic bits (session id, angle idx)
-# travel through ``value`` so the app can switch exclusively on
-# ``action_id``. Renaming either breaks in-flight Slack interactions.
-ANGLE_PICK_ACTION_ID = "squad_angle_pick"
-ANGLE_PICK_ALL_ACTION_ID = "squad_angle_pick_all"
-
-# Value truncation for the per-angle section (keeps the Slack card
-# readable when the ideation agent returns verbose value props).
-_ANGLE_VALUE_PROP_MAX_LEN = 200
-
-
-def _truncate(text: str, max_len: int) -> str:
-    """Return ``text`` truncated to ``max_len`` chars with an ellipsis suffix."""
-    text = (text or "").strip()
-    if len(text) <= max_len:
-        return text
-    return text[:max_len].rstrip() + "…"
-
-
-def _pick_angle_value(session_id: str, idx: int) -> str:
-    """Encode ``(session_id, idx)`` into an ``angle-pick`` action value."""
-    return f"{session_id}:{idx}"
-
-
-def parse_pick_angle_value(value: str) -> tuple[str | None, int | None]:
-    """Decode an ``angle-pick`` action value into ``(session_id, idx)``.
-
-    Returns ``(None, None)`` for any malformed input so handlers can
-    silently ignore the click rather than crash on a stale payload.
-    """
-    if not value or ":" not in value:
-        return None, None
-    session_id, raw_idx = value.split(":", 1)
-    session_id = session_id or None
-    if not raw_idx:
-        return session_id, None
-    try:
-        idx = int(raw_idx)
-    except ValueError:
-        return session_id, None
-    if idx < 0:
-        return session_id, None
-    return session_id, idx
-
-
-def parse_pick_all_value(value: str) -> str | None:
-    """Decode an ``angle-pick-all`` action value into its ``session_id``."""
-    if not value:
-        return None
-    return value.strip() or None
-
-
-def build_angle_choice_blocks(
-    session: Session,
-    angles: list[IdeationAngle],
-    *,
-    selected_idx: int | None = None,
-    benchmark_all: bool = False,
-) -> list[dict]:
-    """Return the Block Kit payload for the ideation angle review.
-
-    When neither ``selected_idx`` nor ``benchmark_all`` is set the card
-    is rendered in its interactive shape (one button per angle plus a
-    secondary "Benchmarker tous les angles" button). After a pick, the
-    actions block is removed and a non-ambiguous recap replaces it so
-    the reviewer can see at a glance which angle won.
-    """
-    closed = benchmark_all or selected_idx is not None
-    header = (
-        ":white_check_mark: *Angle choisi*"
-        if closed
-        else ":sparkles: *Choisir un angle pour la suite*"
-    )
-    blocks: list[dict] = [
-        {"type": "section", "text": {"type": "mrkdwn", "text": header}},
-    ]
-
-    for angle in angles:
-        body = (
-            f"*Angle {angle.idx} — {angle.title}*\n"
-            f"_Segment_ : {angle.segment}\n"
-            f"{_truncate(angle.value_prop, _ANGLE_VALUE_PROP_MAX_LEN)}"
-        )
-        blocks.append(
-            {"type": "section", "text": {"type": "mrkdwn", "text": body}}
-        )
-
-    if closed:
-        if benchmark_all:
-            recap = (
-                ":rocket: *Mode « tous les angles »* — le benchmark produira "
-                "un unique rapport couvrant chaque axe."
-            )
-        else:
-            picked = next(
-                (a for a in angles if a.idx == selected_idx),
-                None,
-            )
-            title = picked.title if picked is not None else f"angle {selected_idx}"
-            recap = (
-                f":dart: *Angle sélectionné* : *Angle {selected_idx} — {title}*"
-            )
-        blocks.append(
-            {"type": "context", "elements": [{"type": "mrkdwn", "text": recap}]}
-        )
-        return blocks
-
-    # Interactive footer — actions + the explanatory copy about the
-    # "benchmark all" fallback so the reviewer knows the tradeoff.
-    blocks.append(
-        {
-            "type": "actions",
-            "block_id": f"sq_angle_{session.id}",
-            "elements": [
-                *[
-                    {
-                        "type": "button",
-                        "action_id": ANGLE_PICK_ACTION_ID,
-                        "text": {
-                            "type": "plain_text",
-                            "text": f"Angle {angle.idx}",
-                        },
-                        "value": _pick_angle_value(session.id, angle.idx),
-                        "style": "primary" if angle.idx == 0 else None,
-                    }
-                    for angle in angles
-                ],
-                {
-                    "type": "button",
-                    "action_id": ANGLE_PICK_ALL_ACTION_ID,
-                    "text": {
-                        "type": "plain_text",
-                        "text": "Benchmarker tous les angles",
-                    },
-                    "value": session.id,
-                },
-            ],
-        }
-    )
-    # Slack buttons drop ``style: null`` so strip it for determinism.
-    for element in blocks[-1]["elements"]:
-        if element.get("style") is None:
-            element.pop("style", None)
-    blocks.append(
-        {
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": (
-                        "_« Benchmarker tous les angles » produit un seul "
-                        "benchmark couvrant tous les axes — pas de parallélisme "
-                        "multi-agents dans cette livraison._"
-                    ),
-                }
-            ],
-        }
-    )
-    return blocks
-
-
-def post_angles_for_review(
-    client,
-    session: Session,
-    db_path: Path | None = None,
-) -> str | None:
-    """Post the angle-review card in the session thread.
-
-    No-ops when the session has no Slack thread (CLI-only) or when the
-    ideation phase did not yield any angle. Slack errors are logged and
-    swallowed so a missing angle card never crashes the pipeline.
-    Returns the Slack ``ts`` on success.
-    """
-    if not session.slack_channel or not session.slack_thread_ts:
-        return None
-    angles = list_ideation_angles(db_path, session.id)
-    if not angles:
-        logger.debug(
-            "No ideation angles persisted for session %s — skipping angle card",
-            session.id,
-        )
-        return None
-    try:
-        response = client.chat_postMessage(
-            channel=session.slack_channel,
-            thread_ts=session.slack_thread_ts,
-            text="Choisir un angle d'idéation",
-            blocks=build_angle_choice_blocks(session, angles),
-        )
-    except Exception:  # noqa: BLE001
-        logger.exception("Failed to post angle-review card for session %s", session.id)
-        return None
-    if isinstance(response, dict):
-        return response.get("ts")
-    getter = getattr(response, "get", None)
-    return getter("ts") if callable(getter) else None
-
-
-def update_angle_choice_message(
-    client,
-    session: Session,
-    selected_idx: int | None,
-    benchmark_all: bool,
-    *,
-    message_ts: str,
-    channel_id: str | None = None,
-    db_path: Path | None = None,
-) -> None:
-    """``chat_update`` the angle-review card to its final (closed) state.
-
-    ``message_ts`` is the original card's timestamp — handlers extract
-    it from the Slack action body (``body["message"]["ts"]``). Slack
-    errors are logged and swallowed so a failed update never prevents
-    the pipeline from resuming.
-    """
-    channel = channel_id or session.slack_channel
-    if not channel or not message_ts:
-        return
-    angles = list_ideation_angles(db_path, session.id)
-    blocks = build_angle_choice_blocks(
-        session,
-        angles,
-        selected_idx=selected_idx,
-        benchmark_all=benchmark_all,
-    )
-    try:
-        client.chat_update(
-            channel=channel,
-            ts=message_ts,
-            text="Angle sélectionné",
-            blocks=blocks,
-        )
-    except Exception:  # noqa: BLE001
-        logger.exception(
-            "Failed to chat_update angle-review card for session %s", session.id
-        )

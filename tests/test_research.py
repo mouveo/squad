@@ -467,25 +467,6 @@ class TestBuildResearchPromptDirectives:
         )
         assert "combler les angles morts" not in prompt
 
-    def test_benchmark_all_angles_adds_coverage_directive(self):
-        prompt = build_research_prompt(
-            idea="x",
-            axes=self._axes(),
-            budget=NORMAL_BUDGET,
-            benchmark_all_angles=True,
-        )
-        assert "UN SEUL rapport" in prompt
-        assert "Mutualise" in prompt or "mutualis" in prompt.lower()
-
-    def test_benchmark_all_false_omits_coverage_directive(self):
-        prompt = build_research_prompt(
-            idea="x",
-            axes=self._axes(),
-            budget=NORMAL_BUDGET,
-            benchmark_all_angles=False,
-        )
-        assert "UN SEUL rapport" not in prompt
-
 
 class TestRunResearchCwdForwarding:
     def test_forwards_existing_project_path(self, session, db_path):
@@ -523,16 +504,3 @@ class TestRunResearchCwdForwarding:
             run_research(session.id, db_path=db_path)
         assert "combler les angles morts" in captured["prompt"]
 
-    def test_forwards_benchmark_all_into_prompt(self, session, db_path):
-        from squad.db import set_benchmark_all_angles
-
-        set_benchmark_all_angles(db_path, session.id, True)
-        captured: dict[str, str] = {}
-
-        def _capture(prompt, **_kwargs):
-            captured["prompt"] = prompt
-            return "# r"
-
-        with patch("squad.research.run_task_text", side_effect=_capture):
-            run_research(session.id, db_path=db_path)
-        assert "UN SEUL rapport" in captured["prompt"]

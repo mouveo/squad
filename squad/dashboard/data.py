@@ -35,7 +35,6 @@ from squad.constants import (
 )
 from squad.db import (
     get_session,
-    list_ideation_angles,
     list_pending_questions,
     list_phase_outputs,
     list_plans,
@@ -45,7 +44,6 @@ from squad.forge_format import extract_lots, validate_plan
 from squad.models import (
     AttachmentMeta,
     GeneratedPlan,
-    IdeationAngle,
     PhaseOutput,
     Question,
     Session,
@@ -133,7 +131,6 @@ class SessionDetail:
     idea: str
     context: str | None
     phases: list[PhaseView]
-    angles: list[IdeationAngle]
     attachments: list[AttachmentMeta]
     pending_questions: list[Question]
     failure_reason: str | None
@@ -377,7 +374,6 @@ def get_session_detail(
     idea = _read_text_if_exists(workspace / "idea.md") or session.idea
     context = _read_text_if_exists(workspace / "context.md")
     phases = [_build_phase_view(phase, session, db_path) for phase in PHASES]
-    angles = list_ideation_angles(db_path, session.id)
     attachments = list_attachments(session.id, db_path=db_path)
     pending = list_pending_questions(session.id, db_path=db_path)
     plans = list_plans(session.id, db_path=db_path)
@@ -387,7 +383,6 @@ def get_session_detail(
         idea=idea,
         context=context,
         phases=phases,
-        angles=list(angles),
         attachments=list(attachments),
         pending_questions=list(pending),
         failure_reason=session.failure_reason,

@@ -1,7 +1,7 @@
 """Session detail page for the Squad dashboard.
 
 Displays a full session: header with status + project, idea + context,
-the 7-phase timeline with outputs inline, ideation angles, attachments
+the 6-phase timeline with outputs inline, attachments
 and pending questions. Read-only — actions live on the plans review
 page.
 """
@@ -108,26 +108,6 @@ def _render_phase(phase: PhaseView) -> None:
                         st.markdown(output.output)
 
 
-def _render_angles(detail: SessionDetail) -> None:
-    if not detail.angles:
-        return
-    st.subheader("🎯 Angles d'idéation")
-    selected_idx = detail.session.selected_angle_idx
-    for angle in detail.angles:
-        title = f"Angle {angle.idx} — {angle.title}"
-        if angle.idx == selected_idx:
-            title += " · ✅ choisi"
-        with st.expander(title, expanded=(angle.idx == selected_idx)):
-            if angle.segment:
-                st.markdown(f"**Segment** : {angle.segment}")
-            if angle.value_prop:
-                st.markdown(f"**Proposition de valeur** : {angle.value_prop}")
-            if angle.approach:
-                st.markdown(f"**Approche** : {angle.approach}")
-            if angle.divergence_note:
-                st.markdown(f"**Divergence** : {angle.divergence_note}")
-
-
 def _render_attachments(detail: SessionDetail) -> None:
     if not detail.attachments:
         return
@@ -156,8 +136,8 @@ def _render_pending_questions(detail: SessionDetail) -> None:
 def render_session_detail_page(session_id: str | None) -> None:
     """Render the session detail view. Redirects when the id is missing.
 
-    The phase timeline + angles + attachments sections auto-refresh every
-    5 seconds via ``st.fragment`` so phase transitions and new attachments
+    The phase timeline + attachments sections auto-refresh every 5
+    seconds via ``st.fragment`` so phase transitions and new attachments
     appear without a manual rerun. The static header is rendered outside
     the fragment so it doesn't flicker on each tick.
     """
@@ -181,7 +161,6 @@ def render_session_detail_page(session_id: str | None) -> None:
         for phase in detail.phases:
             _render_phase(phase)
 
-        _render_angles(detail)
         _render_attachments(detail)
         _render_pending_questions(detail)
 

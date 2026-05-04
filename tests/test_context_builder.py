@@ -11,7 +11,6 @@ from squad.constants import (
     PHASE_CHALLENGE,
     PHASE_CONCEPTION,
     PHASE_ETAT_DES_LIEUX,
-    PHASE_IDEATION,
     PHASE_SYNTHESE,
 )
 from squad.context_builder import (
@@ -735,173 +734,6 @@ class TestBuildCumulativeContextWithAttachments:
         assert "## Fichiers joints" not in ctx
 
 
-# ── LOT 7 — ideation angle injection ──────────────────────────────────────────
-
-
-def _angle(idx: int, title: str = "T", segment: str = "S", vp: str = "VP"):
-    from squad.models import IdeationAngle
-
-    return IdeationAngle(
-        session_id="sess-test",
-        idx=idx,
-        title=title,
-        segment=segment,
-        value_prop=vp,
-        approach="Approach",
-        divergence_note="Divergence",
-    )
-
-
-class TestBuildCumulativeContextAngleInjection:
-    """Angle sections must appear only for the right phase + flag combo."""
-
-    def _session(self, **overrides):
-        return _make_session(**overrides)
-
-    def test_benchmark_all_angles_injects_all(
-        self,
-        patch_get_context,
-        patch_answered_questions,
-    ):
-        session = self._session(
-            selected_angle_idx=0, benchmark_all_angles=True
-        )
-        angles = [_angle(i, title=f"A{i}") for i in range(3)]
-        with (
-            patch("squad.context_builder.get_session", return_value=session),
-            patch("squad.context_builder.list_ideation_angles", return_value=angles),
-            patch("squad.context_builder.list_phase_outputs", return_value=[]),
-        ):
-            ctx = build_cumulative_context("sess-test", PHASE_BENCHMARK)
-        assert "## Angles à benchmarker" in ctx
-        for i in range(3):
-            assert f"### Angle {i} — A{i}" in ctx
-        assert "## Angle choisi" not in ctx
-
-    def test_benchmark_with_selected_idx_injects_single(
-        self,
-        patch_get_context,
-        patch_answered_questions,
-    ):
-        session = self._session(
-            selected_angle_idx=1, benchmark_all_angles=False
-        )
-        angles = [_angle(i, title=f"A{i}") for i in range(3)]
-        with (
-            patch("squad.context_builder.get_session", return_value=session),
-            patch("squad.context_builder.list_ideation_angles", return_value=angles),
-            patch("squad.context_builder.list_phase_outputs", return_value=[]),
-        ):
-            ctx = build_cumulative_context("sess-test", PHASE_BENCHMARK)
-        assert "## Angle choisi" in ctx
-        assert "Angle 1 — A1" in ctx
-        assert "## Angles à benchmarker" not in ctx
-        # Other angles must not leak
-        assert "A0" not in ctx
-        assert "A2" not in ctx
-
-    def test_conception_never_sees_multiple_angles(
-        self,
-        patch_get_context,
-        patch_answered_questions,
-    ):
-        """Even with benchmark_all_angles=True, conception stays mono-angle."""
-        session = self._session(
-            selected_angle_idx=2, benchmark_all_angles=True
-        )
-        angles = [_angle(i, title=f"A{i}") for i in range(3)]
-        with (
-            patch("squad.context_builder.get_session", return_value=session),
-            patch("squad.context_builder.list_ideation_angles", return_value=angles),
-            patch("squad.context_builder.list_phase_outputs", return_value=[]),
-        ):
-            ctx = build_cumulative_context("sess-test", PHASE_CONCEPTION)
-        assert "## Angles à benchmarker" not in ctx
-        assert "## Angle choisi" in ctx
-        assert "Angle 2 — A2" in ctx
-        assert "A0" not in ctx
-
-    def test_challenge_uses_selected_angle(
-        self,
-        patch_get_context,
-        patch_answered_questions,
-    ):
-        session = self._session(selected_angle_idx=0, benchmark_all_angles=False)
-        angles = [_angle(0, title="only")]
-        with (
-            patch("squad.context_builder.get_session", return_value=session),
-            patch("squad.context_builder.list_ideation_angles", return_value=angles),
-            patch("squad.context_builder.list_phase_outputs", return_value=[]),
-        ):
-            ctx = build_cumulative_context("sess-test", PHASE_CHALLENGE)
-        assert "## Angle choisi" in ctx
-
-    def test_synthese_uses_selected_angle(
-        self,
-        patch_get_context,
-        patch_answered_questions,
-    ):
-        session = self._session(selected_angle_idx=0, benchmark_all_angles=True)
-        angles = [_angle(0, title="only")]
-        with (
-            patch("squad.context_builder.get_session", return_value=session),
-            patch("squad.context_builder.list_ideation_angles", return_value=angles),
-            patch("squad.context_builder.list_phase_outputs", return_value=[]),
-        ):
-            ctx = build_cumulative_context("sess-test", PHASE_SYNTHESE)
-        # Mono-angle even though benchmark_all_angles=True
-        assert "## Angle choisi" in ctx
-        assert "## Angles à benchmarker" not in ctx
-
-    def test_cadrage_gets_no_angle_section(
-        self,
-        patch_get_context,
-        patch_answered_questions,
-    ):
-        session = self._session(selected_angle_idx=1, benchmark_all_angles=True)
-        angles = [_angle(i) for i in range(2)]
-        with (
-            patch("squad.context_builder.get_session", return_value=session),
-            patch("squad.context_builder.list_ideation_angles", return_value=angles),
-            patch("squad.context_builder.list_phase_outputs", return_value=[]),
-        ):
-            ctx = build_cumulative_context("sess-test", PHASE_CADRAGE)
-        assert "## Angles à benchmarker" not in ctx
-        assert "## Angle choisi" not in ctx
-
-    def test_benchmark_without_selection_skips_angle(
-        self,
-        patch_get_context,
-        patch_answered_questions,
-    ):
-        """If ideation has not yet run (no angles, no selection), skip."""
-        session = self._session(selected_angle_idx=None, benchmark_all_angles=False)
-        with (
-            patch("squad.context_builder.get_session", return_value=session),
-            patch("squad.context_builder.list_ideation_angles", return_value=[]),
-            patch("squad.context_builder.list_phase_outputs", return_value=[]),
-        ):
-            ctx = build_cumulative_context("sess-test", PHASE_BENCHMARK)
-        assert "## Angle choisi" not in ctx
-        assert "## Angles à benchmarker" not in ctx
-
-    def test_out_of_range_selected_idx_emits_empty(
-        self,
-        patch_get_context,
-        patch_answered_questions,
-    ):
-        """An invalid selected_angle_idx yields no angle section (graceful)."""
-        session = self._session(selected_angle_idx=9, benchmark_all_angles=False)
-        angles = [_angle(0, title="one")]
-        with (
-            patch("squad.context_builder.get_session", return_value=session),
-            patch("squad.context_builder.list_ideation_angles", return_value=angles),
-            patch("squad.context_builder.list_phase_outputs", return_value=[]),
-        ):
-            ctx = build_cumulative_context("sess-test", PHASE_BENCHMARK)
-        assert "## Angle choisi" not in ctx
-
-
 # ── compress_phase_section (LOT 5 — Plan 7) ───────────────────────────────────
 
 
@@ -1059,7 +891,6 @@ class TestBuildCumulativeContextBudgetEnforcement:
         outputs = [
             _make_phase_output(PHASE_CADRAGE, "pm", "A" * 2_000),
             _make_phase_output(PHASE_ETAT_DES_LIEUX, "ux", "B" * 2_000),
-            _make_phase_output(PHASE_IDEATION, "ideation", "C" * 2_000),
             _make_phase_output(PHASE_BENCHMARK, "research", "D" * 2_000),
             # The two most recent are each huge — we protect them so the
             # final size must exceed the budget.

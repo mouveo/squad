@@ -10,7 +10,6 @@ from squad.constants import (
     PHASE_CHALLENGE,
     PHASE_CONCEPTION,
     PHASE_ETAT_DES_LIEUX,
-    PHASE_IDEATION,
     STATUS_DONE,
     STATUS_DRAFT,
     STATUS_FAILED,
@@ -292,32 +291,12 @@ class TestDetermineResumePoint:
         assert rp.phase == PHASE_CHALLENGE
 
 
-# ── ideation pause / resume (LOT 5) ────────────────────────────────────────────
+# ── interviewing pause / resume (cadrage) ─────────────────────────────────────
 
 
-class TestDetermineResumePointIdeationPause:
-    def test_ideation_interviewing_without_selection_raises(self, db_path):
-        """A paused ideation session with no angle picked yet cannot resume."""
-        s = _session(db_path)
-        update_session_status(
-            s.id, STATUS_INTERVIEWING, current_phase=PHASE_IDEATION, db_path=db_path
-        )
-        with pytest.raises(RuntimeError, match="angle"):
-            determine_resume_point(s.id, db_path=db_path)
-
-    def test_ideation_interviewing_with_selection_resumes_at_benchmark(self, db_path):
-        from squad.db import set_selected_angle
-
-        s = _session(db_path)
-        update_session_status(
-            s.id, STATUS_INTERVIEWING, current_phase=PHASE_IDEATION, db_path=db_path
-        )
-        set_selected_angle(db_path, s.id, 2)
-        rp = determine_resume_point(s.id, db_path=db_path)
-        assert rp.phase == PHASE_BENCHMARK
-
-    def test_cadrage_interviewing_unaffected_by_ideation_branch(self, db_path):
-        """Existing cadrage path keeps its current behaviour (after answers)."""
+class TestDetermineResumePointInterviewingCadrage:
+    def test_cadrage_interviewing_resumes_after_answers(self, db_path):
+        """Cadrage pause resumes at etat_des_lieux once all questions answered."""
         from squad.db import answer_question
 
         s = _session(db_path)

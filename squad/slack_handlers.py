@@ -16,8 +16,6 @@ from pathlib import Path
 from squad.attachment_service import AttachmentError, download_file, store_attachment
 from squad.constants import (
     PHASE_CADRAGE,
-    PHASE_IDEATION,
-    STATUS_INTERVIEWING,
     STATUS_REVIEW,
 )
 from squad.db import (
@@ -26,8 +24,6 @@ from squad.db import (
     get_question,
     get_session,
     list_pending_questions,
-    set_benchmark_all_angles,
-    set_selected_angle,
 )
 from squad.forge_bridge import (
     ForgeQueueBusy,
@@ -39,8 +35,6 @@ from squad.pipeline import PipelineError, resume_pipeline, run_pipeline
 from squad.plans_autoscan import autoscan_and_import_plans
 from squad.review_service import reject_session
 from squad.slack_service import (
-    ANGLE_PICK_ACTION_ID,
-    ANGLE_PICK_ALL_ACTION_ID,
     QUESTION_ANSWER_ACTION_ID,
     QUESTION_MODAL_CALLBACK_ID,
     REVIEW_APPROVE_ACTION_ID,
@@ -58,17 +52,13 @@ from squad.slack_service import (
     find_recent_session_by_channel,
     find_session_by_thread,
     format_root_message,
-    parse_pick_all_value,
-    parse_pick_angle_value,
     parse_review_action_value,
-    post_angles_for_review,
     post_pending_questions,
     post_pipeline_event,
     post_plans_for_review,
     post_question_ack,
     post_thread_message,
     record_thread_ts,
-    update_angle_choice_message,
     update_question_message,
     update_review_message,
 )
@@ -80,12 +70,10 @@ logger = logging.getLogger(__name__)
 def _make_event_callback(client, db_path: Path):
     """Return a pipeline event callback that mirrors transitions into Slack.
 
-    Always posts the threaded pipeline-event summary (LOT 2 contract).
-    On entry to ``interviewing`` for the ``cadrage`` phase it also posts
-    each pending question as a separate message with its answer button
-    (LOT 4). Ideation pauses are handled by the dedicated angle-review
-    flow (LOT 6) — this callback intentionally does NOT post questions
-    for them. Observer errors are caught by the pipeline itself.
+    Always posts the threaded pipeline-event summary. On entry to
+    ``interviewing`` for the ``cadrage`` phase it also posts each
+    pending question as a separate message with its answer button.
+    Observer errors are caught by the pipeline itself.
     """
 
     def _callback(event: PipelineEvent) -> None:
@@ -95,8 +83,6 @@ def _make_event_callback(client, db_path: Path):
         post_pipeline_event(event, session, client)
         if event.type == EVENT_INTERVIEWING and event.phase == PHASE_CADRAGE:
             post_pending_questions(client, session, db_path=db_path)
-        elif event.type == EVENT_INTERVIEWING and event.phase == PHASE_IDEATION:
-            post_angles_for_review(client, session, db_path=db_path)
         elif event.type == EVENT_REVIEW:
             post_plans_for_review(client, session, db_path=db_path)
 
@@ -211,19 +197,6 @@ def register_handlers(
             body=body, view=view, client=client, db_path=db_path
         )
 
-    @app.action(ANGLE_PICK_ACTION_ID)
-    def _handle_pick_angle(ack, body, client):
-        ack()
-        handle_pick_angle(
-            body=body, client=client, db_path=db_path, executor=executor
-        )
-
-    @app.action(ANGLE_PICK_ALL_ACTION_ID)
-    def _handle_pick_all_angles(ack, body, client):
-        ack()
-        handle_pick_all_angles(
-            body=body, client=client, db_path=db_path, executor=executor
-        )
 
 
 def handle_squad_command(
@@ -902,147 +875,3 @@ def handle_review_reject_submission(
     )
 
 
-# ── Angle-review actions (LOT 6) ──────────────────────────────────────────────
-
-
-def _extract_action_value(body: dict) -> str | None:
-    """Return the raw ``value`` of the first action in a Block Kit payload.
-
-    Both angle-pick handlers share the same shape: a single button click
-    whose ``value`` encodes the decision. Malformed bodies surface as
-    ``None`` so the handler can no-op safely.
-    """
-    actions = (body or {}).get("actions") or []
-    if not actions:
-        return None
-    value = actions[0].get("value")
-    return str(value) if value else None
-
-
-def _extract_message_ts(body: dict) -> tuple[str | None, str | None]:
-    """Return ``(channel_id, message_ts)`` from a Block Kit action payload."""
-    channel = ((body or {}).get("channel") or {}).get("id") or None
-    ts = (
-        ((body or {}).get("message") or {}).get("ts")
-        or ((body or {}).get("container") or {}).get("message_ts")
-        or None
-    )
-    return channel, ts
-
-
-def _should_accept_angle_pick(session) -> bool:
-    """Return True only when the session is in the angle-awaiting state.
-
-    A session no longer in ``interviewing/ideation`` (already resumed,
-    failed, completed) — or one that has already persisted a
-    ``selected_angle_idx`` — must ignore any subsequent click. This is
-    the idempotence gate called by both angle-pick handlers.
-    """
-    if session is None:
-        return False
-    if session.status != STATUS_INTERVIEWING:
-        return False
-    if session.current_phase != PHASE_IDEATION:
-        return False
-    if session.selected_angle_idx is not None:
-        return False
-    return True
-
-
-def handle_pick_angle(
-    *,
-    body: dict,
-    client,
-    db_path: Path,
-    executor,
-) -> None:
-    """Persist the chosen angle and schedule the pipeline resume.
-
-    Idempotent: a second click — or a click on a session that has moved
-    past the interviewing/ideation state — is silently ignored after
-    the standard ``ack``. Malformed ``value`` payloads are logged and
-    dropped rather than raised, so a replayed or forged click can never
-    kick off a spurious resume.
-    """
-    raw = _extract_action_value(body)
-    session_id, idx = parse_pick_angle_value(raw or "")
-    if not session_id or idx is None:
-        logger.warning("pick_angle ignored — malformed value %r", raw)
-        return
-
-    session = get_session(session_id, db_path=db_path)
-    if not _should_accept_angle_pick(session):
-        logger.debug(
-            "pick_angle ignored for session %s (status=%s, phase=%s, selected=%s)",
-            session_id,
-            getattr(session, "status", None),
-            getattr(session, "current_phase", None),
-            getattr(session, "selected_angle_idx", None),
-        )
-        return
-
-    set_selected_angle(db_path, session_id, idx)
-    channel_id, message_ts = _extract_message_ts(body)
-    refreshed = get_session(session_id, db_path=db_path) or session
-    update_angle_choice_message(
-        client,
-        refreshed,
-        selected_idx=idx,
-        benchmark_all=False,
-        message_ts=message_ts or "",
-        channel_id=channel_id,
-        db_path=db_path,
-    )
-
-    event_callback = _make_event_callback(client, db_path)
-    executor.submit(_resume_pipeline_bg, session_id, db_path, event_callback)
-
-
-def handle_pick_all_angles(
-    *,
-    body: dict,
-    client,
-    db_path: Path,
-    executor,
-) -> None:
-    """Flip ``benchmark_all_angles`` on and schedule the resume.
-
-    Shares the idempotence contract with :func:`handle_pick_angle`:
-    after a first decision the click is a no-op. ``selected_angle_idx``
-    is set to 0 to satisfy downstream code that keys on a concrete
-    index — the ``benchmark_all_angles`` flag is what actually drives
-    the "cover every axis" rendering in the benchmark prompt.
-    """
-    raw = _extract_action_value(body)
-    session_id = parse_pick_all_value(raw or "")
-    if not session_id:
-        logger.warning("pick_all_angles ignored — malformed value %r", raw)
-        return
-
-    session = get_session(session_id, db_path=db_path)
-    if not _should_accept_angle_pick(session):
-        logger.debug(
-            "pick_all_angles ignored for session %s (status=%s, phase=%s, selected=%s)",
-            session_id,
-            getattr(session, "status", None),
-            getattr(session, "current_phase", None),
-            getattr(session, "selected_angle_idx", None),
-        )
-        return
-
-    set_benchmark_all_angles(db_path, session_id, True)
-    set_selected_angle(db_path, session_id, 0)
-    channel_id, message_ts = _extract_message_ts(body)
-    refreshed = get_session(session_id, db_path=db_path) or session
-    update_angle_choice_message(
-        client,
-        refreshed,
-        selected_idx=None,
-        benchmark_all=True,
-        message_ts=message_ts or "",
-        channel_id=channel_id,
-        db_path=db_path,
-    )
-
-    event_callback = _make_event_callback(client, db_path)
-    executor.submit(_resume_pipeline_bg, session_id, db_path, event_callback)

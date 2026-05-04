@@ -8,13 +8,6 @@ PHASE_CONCEPTION = "conception"
 PHASE_CHALLENGE = "challenge"
 PHASE_SYNTHESE = "synthese"
 
-# Legacy ideation identifier — kept temporarily for callers in
-# ``squad.slack_handlers`` / ``squad.slack_service`` / ``squad.recovery``
-# that still gate on the old phase name. The phase itself was removed
-# from ``PHASES`` / ``PHASE_LABELS`` / ``PHASE_DIRS`` and is no longer
-# part of the v2 pipeline (TODO(squad-v2-lot-2): drop with the slack flow).
-PHASE_IDEATION = "ideation"
-
 PHASES: list[str] = [
     PHASE_CADRAGE,
     PHASE_ETAT_DES_LIEUX,

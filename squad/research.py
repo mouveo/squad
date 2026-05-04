@@ -168,7 +168,6 @@ def build_research_prompt(
     protocol: str | None = None,
     *,
     input_richness: str | None = None,
-    benchmark_all_angles: bool = False,
 ) -> str:
     """Build the single research prompt sent to Claude.
 
@@ -178,10 +177,7 @@ def build_research_prompt(
     downstream summarisation in the context builder can rely on it.
 
     ``input_richness="rich"`` flips the prompt into "cover the gaps"
-    mode (directive forbidding generic research restart). ``benchmark_
-    all_angles=True`` instructs the agent to deliver a single report
-    spanning every angle, mutualising findings and avoiding duplicate
-    research between axes.
+    mode (directive forbidding generic research restart).
     """
     axes_block = "\n".join(f"{idx + 1}. {axis}" for idx, axis in enumerate(axes))
     context_block = (extra_context or "").strip()
@@ -200,15 +196,6 @@ def build_research_prompt(
             "pas de refaire une recherche généraliste mais de combler les "
             "angles morts : vérifier les points non couverts, challenger "
             "les chiffres, et identifier les alternatives absentes.\n"
-        )
-    if benchmark_all_angles:
-        directives.append(
-            "## Couverture multi-angles\n"
-            "Produis UN SEUL rapport benchmark couvrant tous les angles "
-            "issus de la phase d'idéation. Mutualise les findings communs "
-            "entre angles et évite de dupliquer les recherches : chaque "
-            "source consultée doit être capitalisée pour tous les angles "
-            "pertinents.\n"
         )
     directives_block = "\n".join(directives)
     body = (
@@ -360,7 +347,6 @@ def run_research(
         extra_context=extra_context,
         protocol=protocol,
         input_richness=session.input_richness,
-        benchmark_all_angles=bool(session.benchmark_all_angles),
     )
 
     logger.info(

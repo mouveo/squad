@@ -37,13 +37,11 @@ from squad.config import get_config_value, get_global_db_path
 from squad.constants import (
     PHASE_BENCHMARK,
     PHASE_CHALLENGE,
-    PHASE_CONCEPTION,
     PHASE_LABELS,
-    PHASE_SYNTHESE,
     PHASES,
 )
-from squad.db import get_session, list_ideation_angles, list_phase_outputs
-from squad.models import AttachmentMeta, IdeationAngle, PhaseOutput
+from squad.db import get_session, list_phase_outputs
+from squad.models import AttachmentMeta, PhaseOutput
 from squad.phase_contracts import ContractError, parse_blockers_contract
 from squad.workspace import get_context
 
@@ -70,7 +68,7 @@ _OMITTED_PHASE_MARKER = (
 _COMPRESSED_FIRST_PARAGRAPH_CHARS = 800
 
 # Emitted only in the pathological case where the protected payload alone
-# (idea, context, Q&A, attachments, angle, constraints, last two phases)
+# (idea, context, Q&A, attachments, constraints, last two phases)
 # already exceeds the budget.
 FINAL_TRUNCATION_MARKER = "[… contexte tronqué au-delà du budget]"
 
@@ -296,81 +294,6 @@ def format_attachments(attachments: list[AttachmentMeta]) -> str:
         parts.append("")
         parts.extend(inline_blocks)
     return "\n".join(parts)
-
-
-# ── ideation angle injection ───────────────────────────────────────────────────
-
-
-# Phases that can see a single selected angle re-injected in their context.
-# Benchmark additionally supports ``## Angles à benchmarker`` when the
-# reviewer picked "benchmark all" — downstream phases stay mono-angle
-# so conception/challenge/synthese aren't contaminated by competing
-# directions.
-_ANGLE_AWARE_PHASES: frozenset[str] = frozenset(
-    {PHASE_BENCHMARK, PHASE_CONCEPTION, PHASE_CHALLENGE, PHASE_SYNTHESE}
-)
-
-
-def _format_angle_entry(angle: IdeationAngle) -> str:
-    """Render one ideation angle as a markdown sub-block for context injection."""
-    return (
-        f"### Angle {angle.idx} — {angle.title}\n"
-        f"- Segment : {angle.segment}\n"
-        f"- Proposition de valeur : {angle.value_prop}\n"
-        f"- Approche : {angle.approach}\n"
-        f"- Divergence : {angle.divergence_note}"
-    )
-
-
-def format_selected_angle(angles: list[IdeationAngle], idx: int) -> str:
-    """Return a ``## Angle choisi`` block for the ``idx``-th angle, or empty.
-
-    An out-of-range ``idx`` or an empty angle list yields an empty string
-    so the caller can append unconditionally. Downstream prompts treat the
-    absence of this section as "angle fallback to the ideation markdown".
-    """
-    match = next((a for a in angles if a.idx == idx), None)
-    if match is None:
-        return ""
-    return "## Angle choisi\n\n" + _format_angle_entry(match)
-
-
-def format_all_angles(angles: list[IdeationAngle]) -> str:
-    """Return a ``## Angles à benchmarker`` block listing every angle, or empty."""
-    if not angles:
-        return ""
-    blocks = [_format_angle_entry(a) for a in angles]
-    return "## Angles à benchmarker\n\n" + "\n\n".join(blocks)
-
-
-def _build_angle_section(
-    session,
-    current_phase: str,
-    angles: list[IdeationAngle],
-) -> str:
-    """Resolve which angle block (if any) should be injected for ``current_phase``.
-
-    Rules (keep in sync with the LOT 7 contract):
-
-    * benchmark + ``benchmark_all_angles=True`` → ``## Angles à benchmarker``.
-    * benchmark/conception/challenge/synthese + ``selected_angle_idx`` set
-      → ``## Angle choisi`` (single angle only, even if the session was
-      flagged ``benchmark_all_angles``).
-    * Everything else → empty string.
-    """
-    if current_phase not in _ANGLE_AWARE_PHASES or not angles:
-        return ""
-
-    benchmark_all = bool(getattr(session, "benchmark_all_angles", False))
-    selected_idx = getattr(session, "selected_angle_idx", None)
-
-    if current_phase == PHASE_BENCHMARK and benchmark_all:
-        return format_all_angles(angles)
-
-    if selected_idx is not None:
-        return format_selected_angle(angles, int(selected_idx))
-
-    return ""
 
 
 # ── challenge constraints ──────────────────────────────────────────────────────
@@ -613,17 +536,6 @@ def build_cumulative_context(
     attachments_block = format_attachments(list_attachments(session_id, db_path=db_path))
     if attachments_block:
         parts.append(attachments_block)
-
-    # 3c. Ideation angle(s) for the phases that consume them. Benchmark is
-    # the only phase that can see ``## Angles à benchmarker`` (multi-angle
-    # mode); every downstream phase receives at most a single
-    # ``## Angle choisi`` block so conception/challenge/synthese never
-    # diverge on competing directions.
-    if current_phase in _ANGLE_AWARE_PHASES:
-        angles = list_ideation_angles(db_path, session_id)
-        angle_block = _build_angle_section(session, current_phase, angles)
-        if angle_block:
-            parts.append(angle_block)
 
     # 4 & 5. Preceding phase outputs + challenge constraints
     if current_phase in PHASES:
