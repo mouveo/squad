@@ -8,7 +8,6 @@ from squad.constants import (
     PHASE_CHALLENGE,
     PHASE_CONCEPTION,
     PHASE_ETAT_DES_LIEUX,
-    PHASE_IDEATION,
     PHASE_SYNTHESE,
     PHASES,
 )
@@ -65,13 +64,9 @@ class TestCadrageConfig:
 
 
 class TestEtatDesLieuxConfig:
-    def test_all_real_agents_listed(self):
+    def test_only_ux_is_default(self):
         cfg = get_phase_config(PHASE_ETAT_DES_LIEUX)
-        assert set(cfg.default_agents) == {"customer-success", "data", "sales", "ux"}
-
-    def test_is_parallel(self):
-        cfg = get_phase_config(PHASE_ETAT_DES_LIEUX)
-        assert cfg.parallel is True
+        assert cfg.default_agents == ("ux",)
 
     def test_no_critical_agents(self):
         cfg = get_phase_config(PHASE_ETAT_DES_LIEUX)
@@ -88,42 +83,17 @@ class TestBenchmarkConfig:
         assert cfg.skip_policy.skippable is True
         assert "light" in cfg.skip_policy.skip_when_depth
 
-
-class TestIdeationConfig:
-    def test_default_agent_is_ideation(self):
-        cfg = get_phase_config(PHASE_IDEATION)
-        assert cfg.default_agents == ("ideation",)
-
-    def test_is_sequential_and_non_critical(self):
-        cfg = get_phase_config(PHASE_IDEATION)
-        assert cfg.parallel is False
-        assert cfg.critical_agents == ()
-
-    def test_can_pause_but_asks_no_questions(self):
-        cfg = get_phase_config(PHASE_IDEATION)
-        assert cfg.can_pause is True
-        assert cfg.max_questions == 0
-
-    def test_single_attempt_no_retry_field(self):
-        cfg = get_phase_config(PHASE_IDEATION)
-        assert cfg.retry_policy.max_attempts == 1
-        assert cfg.retry_policy.retry_on_contract_field is None
-
-    def test_not_skippable(self):
-        cfg = get_phase_config(PHASE_IDEATION)
-        assert cfg.skip_policy.skippable is False
-
-    def test_order_sits_between_etat_des_lieux_and_benchmark(self):
+    def test_order_sits_between_etat_des_lieux_and_conception(self):
         assert get_phase_config(PHASE_ETAT_DES_LIEUX).order == 2
-        assert get_phase_config(PHASE_IDEATION).order == 3
-        assert get_phase_config(PHASE_BENCHMARK).order == 4
+        assert get_phase_config(PHASE_BENCHMARK).order == 3
+        assert get_phase_config(PHASE_CONCEPTION).order == 4
 
 
 class TestConceptionConfig:
-    def test_parallel_with_real_agents(self):
+    def test_parallel_with_ux_and_architect(self):
         cfg = get_phase_config(PHASE_CONCEPTION)
         assert cfg.parallel is True
-        assert set(cfg.default_agents) == {"ai-lead", "architect", "growth", "ux"}
+        assert set(cfg.default_agents) == {"ux", "architect"}
 
     def test_allows_one_retry(self):
         cfg = get_phase_config(PHASE_CONCEPTION)
@@ -132,14 +102,11 @@ class TestConceptionConfig:
 
 
 class TestChallengeConfig:
-    def test_challenge_uses_security_delivery_architect_not_finops(self):
+    def test_challenge_uses_architect_only(self):
         cfg = get_phase_config(PHASE_CHALLENGE)
-        assert set(cfg.default_agents) == {"security", "delivery", "architect"}
-        assert "finops" not in cfg.default_agents
-
-    def test_is_parallel(self):
-        cfg = get_phase_config(PHASE_CHALLENGE)
-        assert cfg.parallel is True
+        assert cfg.default_agents == ("architect",)
+        for retired in ("security", "delivery", "finops"):
+            assert retired not in cfg.default_agents
 
 
 class TestSyntheseConfig:

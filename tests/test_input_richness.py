@@ -210,69 +210,8 @@ class TestUnknownSession:
             score_input_richness("ghost", db_path=db_path)
 
 
-# ── pipeline integration ──────────────────────────────────────────────────────
-
-
-class TestPipelineIntegration:
-    def test_run_phase_persists_input_richness_on_ideation_entry(
-        self, db_path, project_dir, workspace, monkeypatch
-    ):
-        """Entering the ideation phase must compute & persist input_richness."""
-        from squad import pipeline as pipeline_mod
-        from squad.constants import PHASE_IDEATION
-        from squad.workspace import create_workspace
-
-        # Create a session whose signals make it rich (long attachment).
-        _write_attachment(
-            workspace, "ds.md", "x" * (TEXT_ATTACHMENT_RICH_CHARS + 2000)
-        )
-        s = _make_session(db_path, project_dir, workspace, idea="short")
-        create_workspace(s)
-
-        # Stub the ideation service so the test exercises the pre-agent
-        # richness scoring without needing a real Claude round-trip.
-        from types import SimpleNamespace
-
-        monkeypatch.setattr(
-            pipeline_mod,
-            "_run_ideation",
-            lambda session_id, extra_context=None, db_path=None, **kwargs: SimpleNamespace(
-                content="# noop", angles=[], strategy={}
-            ),
-        )
-
-        pipeline_mod.run_phase(s.id, PHASE_IDEATION, db_path=db_path)
-
-        refreshed = get_session(s.id, db_path=db_path)
-        assert refreshed.input_richness == "rich"
-
-    def test_run_phase_recomputes_on_each_ideation_entry(
-        self, db_path, project_dir, workspace, monkeypatch
-    ):
-        """A second entry into ideation reflects the latest filesystem state."""
-        from squad import pipeline as pipeline_mod
-        from squad.constants import PHASE_IDEATION
-        from squad.workspace import create_workspace
-
-        s = _make_session(db_path, project_dir, workspace, idea="short")
-        create_workspace(s)
-
-        monkeypatch.setattr(
-            pipeline_mod,
-            "_run_agents",
-            lambda cfg, session, ctx, instr, db_path=None: (
-                {"ideation": "# noop"},
-                {},
-            ),
-        )
-
-        pipeline_mod.run_phase(s.id, PHASE_IDEATION, db_path=db_path)
-        assert get_session(s.id, db_path=db_path).input_richness == "sparse"
-
-        # User drops a fat brief in the thread between two entries.
-        _write_attachment(
-            workspace, "brief.md", "x" * (TEXT_ATTACHMENT_RICH_CHARS + 2000)
-        )
-
-        pipeline_mod.run_phase(s.id, PHASE_IDEATION, db_path=db_path)
-        assert get_session(s.id, db_path=db_path).input_richness == "rich"
+# Pipeline integration tests covered the legacy ideation entry hook
+# (auto-rescore on entry into the ideation phase). The ideation phase
+# was removed in v2 (see plan squad-v2-lot-1) so these tests no longer
+# apply; ``score_input_richness`` is still exercised via the standalone
+# unit tests above.

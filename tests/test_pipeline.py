@@ -12,7 +12,6 @@ from squad.constants import (
     PHASE_CHALLENGE,
     PHASE_CONCEPTION,
     PHASE_ETAT_DES_LIEUX,
-    PHASE_IDEATION,
     PHASES,
 )
 from squad.db import (
@@ -151,7 +150,7 @@ def _configure_mocks(
 
 
 class TestHappyPath:
-    def test_runs_all_seven_phases_in_order(self, db_path, session, happy_pm_output):
+    def test_runs_all_phases_in_order(self, db_path, session, happy_pm_output):
         calls: list[tuple[str, str]] = []
 
         def _record_agent(agent_name, session_id, phase, **kwargs):
@@ -171,26 +170,20 @@ class TestHappyPath:
             calls.append(("benchmark", "research"))
             return SimpleNamespace(content="# research / benchmark")
 
-        def _record_ideation(session_id, extra_context=None, db_path=None, **kwargs):
-            calls.append(("ideation", "ideation"))
-            return SimpleNamespace(content="# ideation / ideation")
-
         with (
             patch("squad.pipeline.run_agent", side_effect=_record_agent),
             patch("squad.pipeline.run_agents_tolerant", side_effect=_record_tolerant),
             patch("squad.pipeline.run_research", side_effect=_record_research),
-            patch("squad.pipeline._run_ideation", side_effect=_record_ideation),
         ):
             run_pipeline(session.id, db_path=db_path)
 
         phases_run = [p for p, _ in calls]
         first_indexes = [phases_run.index(p) for p in PHASES]
         assert first_indexes == sorted(first_indexes)
-        # Ideation sits strictly between etat_des_lieux and benchmark.
         assert (
             phases_run.index(PHASE_ETAT_DES_LIEUX)
-            < phases_run.index(PHASE_IDEATION)
             < phases_run.index("benchmark")
+            < phases_run.index(PHASE_CONCEPTION)
         )
 
     def test_status_is_review_after_pipeline(self, db_path, session, happy_pm_output):
@@ -223,31 +216,6 @@ class TestHappyPath:
         # First pass → attempt 1 everywhere
         assert {po.attempt for po in outputs} == {1}
 
-    def test_ideation_failure_does_not_block_pipeline(
-        self, db_path, session, happy_pm_output
-    ):
-        """Non-critical: run_ideation raising must not fail the session."""
-
-        def _boom(session_id, extra_context=None, db_path=None, **kwargs):
-            raise RuntimeError("ideation service down")
-
-        with (
-            patch("squad.pipeline.run_agent") as m_agent,
-            patch("squad.pipeline.run_agents_tolerant") as m_tol,
-            patch("squad.pipeline._run_ideation", side_effect=_boom),
-        ):
-            _configure_mocks(m_agent, m_tol, happy_pm_output)
-            run_pipeline(session.id, db_path=db_path)
-
-        updated = get_session(session.id, db_path=db_path)
-        assert updated.status == "review"
-        # Ideation still has a persisted (fallback) output.
-        ideation_outputs = list_phase_outputs(
-            session.id, phase=PHASE_IDEATION, db_path=db_path
-        )
-        assert len(ideation_outputs) == 1
-        assert "fallback" in ideation_outputs[0].output.lower()
-
     def test_parallel_phase_uses_tolerant_executor(self, db_path, session, happy_pm_output):
         with (
             patch("squad.pipeline.run_agent") as m_agent,
@@ -260,7 +228,7 @@ class TestHappyPath:
             call.kwargs.get("phase", call.args[2] if len(call.args) > 2 else None)
             for call in m_tol.call_args_list
         ]
-        assert PHASE_ETAT_DES_LIEUX in phases_dispatched
+        # Conception is the only multi-agent parallel phase in v2.
         assert PHASE_CONCEPTION in phases_dispatched
 
 
@@ -405,29 +373,19 @@ _BLOCKING_CHALLENGE = (
 
 class TestChallengeRetry:
     def test_blocking_challenge_triggers_conception_retry(self, db_path, session, happy_pm_output):
-        call_phases: list[tuple[str, int]] = []
-
-        def _agent(agent_name, session_id, phase, **kwargs):
-            # Attempt count not known here — track unique calls per phase
-            call_phases.append((phase, 0))
-            return happy_pm_output if agent_name == "pm" else f"# {agent_name}"
-
-        # Track how many times challenge runs (first: blocking, second: clean)
         challenge_count = {"n": 0}
 
+        def _agent(agent_name, session_id, phase, **kwargs):
+            if phase == PHASE_CHALLENGE and agent_name == "architect":
+                challenge_count["n"] += 1
+                # First challenge run → blockers; second → clean
+                return _BLOCKING_CHALLENGE if challenge_count["n"] == 1 else (
+                    '# ok\n```json\n{"blockers": []}\n```'
+                )
+            return happy_pm_output if agent_name == "pm" else f"# {agent_name}"
+
         def _tolerant(agents_list, session_id, phase, **kwargs):
-            results = {}
-            for a in agents_list:
-                if phase == PHASE_CHALLENGE:
-                    challenge_count["n"] += 1
-                    # First challenge run → blockers; second → clean
-                    if challenge_count["n"] <= len(agents_list):
-                        results[a] = _BLOCKING_CHALLENGE
-                    else:
-                        results[a] = '# ok\n```json\n{"blockers": []}\n```'
-                else:
-                    results[a] = f"# {a} / {phase}"
-            return results, {}
+            return {a: f"# {a} / {phase}" for a in agents_list}, {}
 
         with (
             patch("squad.pipeline.run_agent", side_effect=_agent),
@@ -445,17 +403,13 @@ class TestChallengeRetry:
 
     def test_retry_happens_only_once(self, db_path, session, happy_pm_output):
         # Challenge keeps returning blockers — retry must happen only once
-        def _agent(agent_name, **kwargs):
+        def _agent(agent_name, session_id=None, phase=None, **kwargs):
+            if phase == PHASE_CHALLENGE and agent_name == "architect":
+                return _BLOCKING_CHALLENGE
             return happy_pm_output if agent_name == "pm" else "# ok"
 
         def _tolerant(agents_list, session_id, phase, **kwargs):
-            results = {}
-            for a in agents_list:
-                if phase == PHASE_CHALLENGE:
-                    results[a] = _BLOCKING_CHALLENGE
-                else:
-                    results[a] = f"# {a}"
-            return results, {}
+            return {a: f"# {a}" for a in agents_list}, {}
 
         with (
             patch("squad.pipeline.run_agent", side_effect=_agent),
@@ -831,39 +785,25 @@ class TestSyntheseContractRetry:
 
 
 class TestCwdRoutingByAgent:
-    def test_parallel_phase_routes_cwd_only_to_ux_and_architect(
+    def test_etat_des_lieux_routes_cwd_to_ux(
         self, db_path, session, happy_pm_output
     ):
-        """In etat_des_lieux, only ux should get cwd=project_path; others None."""
-        captured_cwd_maps: list[dict[str, str | None]] = []
+        """In etat_des_lieux (sequential, ux only), ux gets cwd=project_path."""
+        captured_kwargs: list[dict] = []
 
-        def _tolerant(
-            agents_list,
-            session_id,
-            phase,
-            context_sections_by_agent=None,
-            *,
-            cumulative_context=None,
-            phase_instruction=None,
-            cwd_by_agent=None,
-        ):
-            if phase == PHASE_ETAT_DES_LIEUX:
-                captured_cwd_maps.append(dict(cwd_by_agent or {}))
-            return {a: f"# {a}" for a in agents_list}, {}
+        def _agent(*args, **kwargs):
+            captured_kwargs.append(kwargs)
+            return "# ux output"
 
-        with (
-            patch("squad.pipeline.run_agent", return_value=happy_pm_output),
-            patch("squad.pipeline.run_agents_tolerant", side_effect=_tolerant),
-        ):
+        with patch("squad.pipeline.run_agent", side_effect=_agent):
             run_phase(session.id, PHASE_ETAT_DES_LIEUX, db_path=db_path)
 
-        assert captured_cwd_maps, "etat_des_lieux did not dispatch through run_agents_tolerant"
-        cwd_map = captured_cwd_maps[0]
-        assert cwd_map["ux"] == session.project_path
-        for agent in ("customer-success", "data", "sales"):
-            assert cwd_map.get(agent) is None
+        assert captured_kwargs
+        ux_call = captured_kwargs[0]
+        assert ux_call.get("agent_name") == "ux"
+        assert ux_call.get("cwd") == session.project_path
 
-    def test_conception_phase_routes_cwd_to_ux_and_architect_only(
+    def test_conception_phase_routes_cwd_to_ux_and_architect(
         self, db_path, session, happy_pm_output
     ):
         captured: list[dict[str, str | None]] = []
@@ -892,39 +832,24 @@ class TestCwdRoutingByAgent:
         cwd_map = captured[0]
         assert cwd_map["ux"] == session.project_path
         assert cwd_map["architect"] == session.project_path
-        assert cwd_map.get("ai-lead") is None
-        assert cwd_map.get("growth") is None
 
-    def test_challenge_phase_routes_cwd_to_architect_only(
+    def test_challenge_phase_routes_cwd_to_architect(
         self, db_path, session, happy_pm_output
     ):
-        captured: list[dict[str, str | None]] = []
+        """Challenge runs sequentially with architect only — cwd routed via run_agent."""
+        captured_kwargs: list[dict] = []
 
-        def _tolerant(
-            agents_list,
-            session_id,
-            phase,
-            context_sections_by_agent=None,
-            *,
-            cumulative_context=None,
-            phase_instruction=None,
-            cwd_by_agent=None,
-        ):
-            if phase == PHASE_CHALLENGE:
-                captured.append(dict(cwd_by_agent or {}))
-            return {a: f"# {a}" for a in agents_list}, {}
+        def _agent(*args, **kwargs):
+            captured_kwargs.append(kwargs)
+            return "# architect output"
 
-        with (
-            patch("squad.pipeline.run_agent", return_value=happy_pm_output),
-            patch("squad.pipeline.run_agents_tolerant", side_effect=_tolerant),
-        ):
+        with patch("squad.pipeline.run_agent", side_effect=_agent):
             run_phase(session.id, PHASE_CHALLENGE, db_path=db_path)
 
-        assert captured
-        cwd_map = captured[0]
-        assert cwd_map["architect"] == session.project_path
-        assert cwd_map.get("security") is None
-        assert cwd_map.get("delivery") is None
+        assert captured_kwargs
+        architect_call = captured_kwargs[0]
+        assert architect_call.get("agent_name") == "architect"
+        assert architect_call.get("cwd") == session.project_path
 
     def test_sequential_phase_does_not_route_cwd_for_pm(
         self, db_path, session, happy_pm_output
@@ -992,31 +917,23 @@ class TestCwdRoutingByAgent:
         )
         create_workspace(s)
 
-        captured: list[dict[str, str | None]] = []
+        captured: list[dict] = []
 
-        def _tolerant(
-            agents_list,
-            session_id,
-            phase,
-            context_sections_by_agent=None,
-            *,
-            cumulative_context=None,
-            phase_instruction=None,
-            cwd_by_agent=None,
-        ):
-            captured.append(dict(cwd_by_agent or {}))
-            return {a: f"# {a}" for a in agents_list}, {}
+        def _agent(*args, **kwargs):
+            captured.append(kwargs)
+            return "# ux output"
 
         import logging
 
         with (
             caplog.at_level(logging.WARNING, logger="squad.pipeline"),
-            patch("squad.pipeline.run_agents_tolerant", side_effect=_tolerant),
+            patch("squad.pipeline.run_agent", side_effect=_agent),
         ):
             run_phase(s.id, PHASE_ETAT_DES_LIEUX, db_path=db_path)
 
         assert captured
-        assert captured[0]["ux"] is None
+        assert captured[0].get("agent_name") == "ux"
+        assert captured[0].get("cwd") is None
         assert any("does not exist" in r.message for r in caplog.records)
 
     def test_empty_project_path_yields_cwd_none(
@@ -1033,26 +950,18 @@ class TestCwdRoutingByAgent:
         )
         create_workspace(s)
 
-        captured: list[dict[str, str | None]] = []
+        captured: list[dict] = []
 
-        def _tolerant(
-            agents_list,
-            session_id,
-            phase,
-            context_sections_by_agent=None,
-            *,
-            cumulative_context=None,
-            phase_instruction=None,
-            cwd_by_agent=None,
-        ):
-            captured.append(dict(cwd_by_agent or {}))
-            return {a: f"# {a}" for a in agents_list}, {}
+        def _agent(*args, **kwargs):
+            captured.append(kwargs)
+            return "# ux output"
 
-        with patch("squad.pipeline.run_agents_tolerant", side_effect=_tolerant):
+        with patch("squad.pipeline.run_agent", side_effect=_agent):
             run_phase(s.id, PHASE_ETAT_DES_LIEUX, db_path=db_path)
 
         assert captured
-        assert captured[0]["ux"] is None
+        assert captured[0].get("agent_name") == "ux"
+        assert captured[0].get("cwd") is None
 
 
 # ── smoke: pipeline -> executor (LOT 5 — Plan 5) ──────────────────────────────
@@ -1109,26 +1018,6 @@ class TestPipelineExecutorSmoke:
         assert self._tools_of(ux_calls[0]) == "Read,WebSearch,WebFetch,Glob,LS,Grep"
         assert ux_calls[0]["cwd"] == session.project_path
 
-    def test_customer_success_keeps_read_only_without_cwd(self, db_path, session):
-        calls, fake = self._capture_calls()
-        with patch("squad.executor._call_claude_cli", side_effect=fake):
-            run_phase(session.id, PHASE_ETAT_DES_LIEUX, db_path=db_path)
-
-        cs_calls = self._calls_for_agent(calls, "customer-success")
-        assert len(cs_calls) == 1
-        assert self._tools_of(cs_calls[0]) == "Read"
-        assert cs_calls[0]["cwd"] is None
-
-    def test_sales_keeps_web_tools_without_project_cwd(self, db_path, session):
-        calls, fake = self._capture_calls()
-        with patch("squad.executor._call_claude_cli", side_effect=fake):
-            run_phase(session.id, PHASE_ETAT_DES_LIEUX, db_path=db_path)
-
-        sales_calls = self._calls_for_agent(calls, "sales")
-        assert len(sales_calls) == 1
-        assert self._tools_of(sales_calls[0]) == "Read,WebSearch,WebFetch"
-        assert sales_calls[0]["cwd"] is None
-
     def test_architect_gets_exploration_tools_and_cwd_in_challenge(
         self, db_path, session
     ):
@@ -1139,263 +1028,6 @@ class TestPipelineExecutorSmoke:
         architect_calls = self._calls_for_agent(calls, "architect")
         assert len(architect_calls) == 1
         assert self._tools_of(architect_calls[0]) == "Read,WebSearch,WebFetch,Glob,LS,Grep"
-
-
-# ── ideation strategy resolver (LOT 5) ────────────────────────────────────────
-
-
-class TestResolveIdeationStrategy:
-    """Unit tests for the pure decision function ``_resolve_ideation_strategy``."""
-
-    def _result(self, *, strategy: str = "auto_pick", idx: int = 0, n_angles: int = 3):
-        from squad.models import IdeationAngle
-
-        angles = [
-            IdeationAngle(
-                session_id="s",
-                idx=i,
-                title=f"angle {i}",
-                segment="seg",
-                value_prop="vp",
-                approach="ap",
-                divergence_note="div",
-            )
-            for i in range(n_angles)
-        ]
-        strategy_dict = {
-            "strategy": strategy,
-            "best_angle_idx": idx,
-            "divergence_score": "medium",
-        }
-        return SimpleNamespace(content="# md", angles=angles, strategy=strategy_dict)
-
-    def _session(self, **overrides):
-        from squad.models import Session
-
-        defaults = dict(
-            id="s",
-            title="t",
-            project_path="/tmp/p",
-            workspace_path="/tmp/ws",
-            idea="i",
-            slack_channel="C1",
-            slack_thread_ts="ts1",
-            input_richness="sparse",
-            selected_angle_idx=None,
-        )
-        return Session(**{**defaults, **overrides})
-
-    def test_no_slack_thread_forces_auto_pick(self, db_path):
-        from squad.pipeline import _resolve_ideation_strategy
-
-        s = self._session(slack_channel=None, slack_thread_ts=None)
-        decision = _resolve_ideation_strategy(
-            s, self._result(strategy="ask_user", idx=2), db_path
-        )
-        assert decision.auto_pick is True
-        assert decision.selected_idx == 2
-
-    def test_input_richness_rich_overrides_ask_user(self, db_path):
-        from squad.pipeline import _resolve_ideation_strategy
-
-        s = self._session(input_richness="rich")
-        decision = _resolve_ideation_strategy(
-            s, self._result(strategy="ask_user", idx=1), db_path
-        )
-        assert decision.auto_pick is True
-        assert decision.selected_idx == 1
-
-    def test_already_selected_skips_decision(self, db_path):
-        from squad.pipeline import _resolve_ideation_strategy
-
-        s = self._session(selected_angle_idx=2)
-        # Even with ask_user + sparse + slack thread the existing selection wins.
-        decision = _resolve_ideation_strategy(
-            s, self._result(strategy="ask_user", idx=0), db_path
-        )
-        assert decision.auto_pick is True
-        assert decision.selected_idx == 2
-
-    def test_ask_user_sparse_with_slack_pauses(self, db_path):
-        from squad.pipeline import _resolve_ideation_strategy
-
-        s = self._session()  # sparse + slack thread
-        decision = _resolve_ideation_strategy(
-            s, self._result(strategy="ask_user", idx=0), db_path
-        )
-        assert decision.auto_pick is False
-        assert decision.selected_idx is None
-
-    def test_auto_pick_strategy_passes_through(self, db_path):
-        from squad.pipeline import _resolve_ideation_strategy
-
-        s = self._session()
-        decision = _resolve_ideation_strategy(
-            s, self._result(strategy="auto_pick", idx=2), db_path
-        )
-        assert decision.auto_pick is True
-        assert decision.selected_idx == 2
-
-    def test_malformed_strategy_falls_back_to_zero(self, db_path):
-        from squad.pipeline import _resolve_ideation_strategy
-
-        s = self._session()
-        bad = SimpleNamespace(
-            content="",
-            angles=self._result().angles,
-            strategy={"strategy": "magic", "best_angle_idx": 0, "divergence_score": "low"},
-        )
-        decision = _resolve_ideation_strategy(s, bad, db_path)
-        assert decision.auto_pick is True
-        assert decision.selected_idx == 0
-
-    def test_out_of_range_idx_falls_back_to_zero(self, db_path):
-        from squad.pipeline import _resolve_ideation_strategy
-
-        s = self._session()
-        bad = self._result(strategy="auto_pick", idx=99, n_angles=3)
-        decision = _resolve_ideation_strategy(s, bad, db_path)
-        assert decision.auto_pick is True
-        assert decision.selected_idx == 0
-
-    def test_empty_angles_falls_back_to_zero(self, db_path):
-        from squad.pipeline import _resolve_ideation_strategy
-
-        s = self._session()
-        bad = SimpleNamespace(
-            content="",
-            angles=[],
-            strategy={"strategy": "auto_pick", "best_angle_idx": 0, "divergence_score": "low"},
-        )
-        decision = _resolve_ideation_strategy(s, bad, db_path)
-        assert decision.auto_pick is True
-        assert decision.selected_idx == 0
-
-
-# ── ideation phase end-to-end (LOT 5) ─────────────────────────────────────────
-
-
-class TestIdeationPhasePauseAndAutoPick:
-    """Integration of run_phase + ideation + strategy gate."""
-
-    def _ideation_result(self, *, strategy: str, idx: int = 0):
-        from squad.models import IdeationAngle
-
-        angles = [
-            IdeationAngle(
-                session_id="s",
-                idx=i,
-                title=f"angle {i}",
-                segment="seg",
-                value_prop="vp",
-                approach="ap",
-                divergence_note="div",
-            )
-            for i in range(3)
-        ]
-        return SimpleNamespace(
-            content=(
-                "# Ideation\n"
-                "## Angle 0 — A\n- Segment: a\n\n"
-                "## Angle 1 — B\n- Segment: b\n\n"
-                "## Angle 2 — C\n- Segment: c\n"
-            ),
-            angles=angles,
-            strategy={
-                "strategy": strategy,
-                "best_angle_idx": idx,
-                "divergence_score": "medium",
-            },
-        )
-
-    def _slack_session(self, db_path, tmp_path, project_dir):
-        # Slack-aware session: has thread + channel.
-        s = create_session(
-            title="Slack",
-            project_path=str(project_dir),
-            workspace_path=str(tmp_path / "ws-slack"),
-            idea="x",
-            db_path=db_path,
-            slack_channel="C1",
-        )
-        # update_session_slack_thread persists the thread ts.
-        from squad.db import update_session_slack_thread
-
-        update_session_slack_thread(s.id, "1700.0001", db_path=db_path)
-        create_workspace(get_session(s.id, db_path=db_path))
-        return get_session(s.id, db_path=db_path)
-
-    def test_no_slack_session_forces_auto_pick(self, db_path, session):
-        with patch(
-            "squad.pipeline._run_ideation",
-            return_value=self._ideation_result(strategy="ask_user", idx=2),
-        ):
-            result = run_phase(session.id, PHASE_IDEATION, db_path=db_path)
-
-        assert result.paused is False
-        refreshed = get_session(session.id, db_path=db_path)
-        # ask_user was overridden — selected_idx persisted.
-        assert refreshed.selected_angle_idx == 2
-
-    def test_rich_input_overrides_ask_user(self, db_path, project_dir, tmp_path):
-        s = self._slack_session(db_path, tmp_path, project_dir)
-        # Force input_richness=rich to skip the user round-trip.
-        from squad.db import update_input_richness
-
-        update_input_richness(db_path, s.id, "rich")
-        # Make scoring deterministic too — we want it to remain rich.
-        with (
-            patch("squad.pipeline.score_input_richness", return_value="rich"),
-            patch(
-                "squad.pipeline._run_ideation",
-                return_value=self._ideation_result(strategy="ask_user", idx=1),
-            ),
-        ):
-            result = run_phase(s.id, PHASE_IDEATION, db_path=db_path)
-
-        assert result.paused is False
-        refreshed = get_session(s.id, db_path=db_path)
-        assert refreshed.selected_angle_idx == 1
-
-    def test_ask_user_sparse_with_slack_pauses_session(
-        self, db_path, project_dir, tmp_path
-    ):
-        s = self._slack_session(db_path, tmp_path, project_dir)
-        with (
-            patch("squad.pipeline.score_input_richness", return_value="sparse"),
-            patch(
-                "squad.pipeline._run_ideation",
-                return_value=self._ideation_result(strategy="ask_user", idx=0),
-            ),
-        ):
-            result = run_phase(s.id, PHASE_IDEATION, db_path=db_path)
-
-        assert result.paused is True
-        refreshed = get_session(s.id, db_path=db_path)
-        assert refreshed.status == "interviewing"
-        assert refreshed.current_phase == PHASE_IDEATION
-        # No angle was auto-selected — a human must pick.
-        assert refreshed.selected_angle_idx is None
-
-    def test_already_selected_resumes_to_benchmark(
-        self, db_path, project_dir, tmp_path
-    ):
-        s = self._slack_session(db_path, tmp_path, project_dir)
-        from squad.db import set_selected_angle
-
-        set_selected_angle(db_path, s.id, 1)
-        with (
-            patch("squad.pipeline.score_input_richness", return_value="sparse"),
-            patch(
-                "squad.pipeline._run_ideation",
-                return_value=self._ideation_result(strategy="ask_user", idx=0),
-            ),
-        ):
-            result = run_phase(s.id, PHASE_IDEATION, db_path=db_path)
-        assert result.paused is False
-        refreshed = get_session(s.id, db_path=db_path)
-        # Pre-existing selection preserved (not overwritten by agent's idx=0).
-        assert refreshed.selected_angle_idx == 1
 
 
 # ── subject profile guarantee (LOT 2 — Plan 7) ────────────────────────────────
@@ -1469,12 +1101,6 @@ class TestEnsureSubjectProfile:
                 "squad.pipeline.run_research",
                 return_value=SimpleNamespace(content="# research"),
             ),
-            patch(
-                "squad.pipeline._run_ideation",
-                return_value=SimpleNamespace(
-                    content="# ideation", angles=[], strategy={}
-                ),
-            ),
         ):
             _configure_mocks(m_agent, m_tol, happy_pm_output)
             run_pipeline(unclassified_session.id, db_path=db_path)
@@ -1496,12 +1122,6 @@ class TestEnsureSubjectProfile:
             patch(
                 "squad.pipeline.run_research",
                 return_value=SimpleNamespace(content="# research"),
-            ),
-            patch(
-                "squad.pipeline._run_ideation",
-                return_value=SimpleNamespace(
-                    content="# ideation", angles=[], strategy={}
-                ),
             ),
         ):
             _configure_mocks(m_agent, m_tol, happy_pm_output)
@@ -1610,12 +1230,6 @@ class TestLightDepthSkipsBenchmark:
             patch("squad.pipeline.run_agent") as m_agent,
             patch("squad.pipeline.run_agents_tolerant") as m_tol,
             patch("squad.pipeline.run_research") as m_research,
-            patch(
-                "squad.pipeline._run_ideation",
-                return_value=SimpleNamespace(
-                    content="# ideation", angles=[], strategy={}
-                ),
-            ),
         ):
             _configure_mocks(m_agent, m_tol, happy_pm_output)
             run_pipeline(session.id, db_path=db_path)
@@ -1673,12 +1287,6 @@ class TestLightDepthSkipsBenchmark:
             patch("squad.pipeline.run_agent") as m_agent,
             patch("squad.pipeline.run_agents_tolerant") as m_tol,
             patch("squad.pipeline.run_research") as m_research,
-            patch(
-                "squad.pipeline._run_ideation",
-                return_value=SimpleNamespace(
-                    content="# ideation", angles=[], strategy={}
-                ),
-            ),
         ):
             _configure_mocks(m_agent, m_tol, happy_pm_output)
             run_pipeline(s.id, db_path=db_path)

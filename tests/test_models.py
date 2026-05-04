@@ -16,9 +16,9 @@ from squad.constants import (
     MODE_AUTONOMOUS,
     PHASE_BENCHMARK,
     PHASE_CADRAGE,
+    PHASE_CONCEPTION,
     PHASE_DIRS,
     PHASE_ETAT_DES_LIEUX,
-    PHASE_IDEATION,
     PHASE_LABELS,
     PHASE_SYNTHESE,
     PHASES,
@@ -63,20 +63,16 @@ class TestPhaseConstants:
         assert PHASES == [
             "cadrage",
             "etat_des_lieux",
-            "ideation",
             "benchmark",
             "conception",
             "challenge",
             "synthese",
         ]
 
-    def test_ideation_sits_between_etat_des_lieux_and_benchmark(self):
-        # Inserted between etat_des_lieux (index 1) and benchmark —
-        # so ideation is at index 2 in the 0-based PHASES list.
-        assert PHASES.index(PHASE_IDEATION) == 2
-        assert PHASES.index(PHASE_IDEATION) == PHASES.index(PHASE_ETAT_DES_LIEUX) + 1
-        assert PHASES.index(PHASE_BENCHMARK) == PHASES.index(PHASE_IDEATION) + 1
-        assert len(PHASES) == 7
+    def test_benchmark_sits_after_etat_des_lieux(self):
+        assert PHASES.index(PHASE_BENCHMARK) == PHASES.index(PHASE_ETAT_DES_LIEUX) + 1
+        assert PHASES.index(PHASE_CONCEPTION) == PHASES.index(PHASE_BENCHMARK) + 1
+        assert len(PHASES) == 6
 
     def test_phases_are_ascii(self):
         for phase in PHASES:
@@ -102,9 +98,9 @@ class TestPhaseConstants:
     def test_phase_dirs_content(self):
         assert PHASE_DIRS[PHASE_CADRAGE] == "1-cadrage"
         assert PHASE_DIRS[PHASE_ETAT_DES_LIEUX] == "2-etat-des-lieux"
-        assert PHASE_DIRS[PHASE_IDEATION] == "3-ideation"
-        assert PHASE_DIRS[PHASE_BENCHMARK] == "4-benchmark"
-        assert PHASE_DIRS[PHASE_SYNTHESE] == "7-synthese"
+        assert PHASE_DIRS[PHASE_BENCHMARK] == "3-benchmark"
+        assert PHASE_DIRS[PHASE_CONCEPTION] == "4-conception"
+        assert PHASE_DIRS[PHASE_SYNTHESE] == "6-synthese"
 
 
 class TestSessionStatusConstants:

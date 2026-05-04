@@ -968,17 +968,16 @@ class TestBuildCumulativeContextBudgetEnforcement:
         """Return outputs for the 5 phases preceding ``synthese``.
 
         Using ``synthese`` as the current phase guarantees 5 preceding
-        phases (cadrage, etat_des_lieux, ideation, benchmark, conception,
-        challenge), which is enough to exercise "compress older, keep the
-        two most recent" logic deterministically.
+        phases (cadrage, etat_des_lieux, benchmark, conception,
+        challenge), which is enough to exercise "compress older, keep
+        the two most recent" logic deterministically.
         """
         return [
             _make_phase_output(PHASE_CADRAGE, "pm", "A" * body_size),
             _make_phase_output(PHASE_ETAT_DES_LIEUX, "ux", "B" * body_size),
-            _make_phase_output(PHASE_IDEATION, "ideation", "C" * body_size),
             _make_phase_output(PHASE_BENCHMARK, "research", "D" * body_size),
             _make_phase_output(PHASE_CONCEPTION, "architect", "E" * body_size),
-            _make_phase_output(PHASE_CHALLENGE, "security", "F" * body_size),
+            _make_phase_output(PHASE_CHALLENGE, "architect", "F" * body_size),
         ]
 
     def test_under_budget_returns_unchanged_content(
@@ -1003,7 +1002,7 @@ class TestBuildCumulativeContextBudgetEnforcement:
         assert "Historique omis" not in ctx
         assert FINAL_TRUNCATION_MARKER not in ctx
         # Every phase body appears untouched.
-        for letter in ("A", "B", "C", "D", "E", "F"):
+        for letter in ("A", "B", "D", "E", "F"):
             assert letter * 500 in ctx
 
     def test_moderate_overflow_compresses_oldest_and_keeps_last_two(

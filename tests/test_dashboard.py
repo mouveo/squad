@@ -10,7 +10,6 @@ from squad.constants import (
     PHASE_CHALLENGE,
     PHASE_CONCEPTION,
     PHASE_ETAT_DES_LIEUX,
-    PHASE_IDEATION,
     PHASE_SYNTHESE,
     SESSION_STATUSES,
     STATUS_APPROVED,
@@ -318,10 +317,10 @@ def test_get_session_detail_aggregates_phases_with_retries(tmp_path: Path) -> No
         sess.id, PHASE_ETAT_DES_LIEUX, "light mode", db_path=db_path
     )
     # Phase 3 — ideation: retried twice, with outputs on both attempts
-    increment_phase_attempt(sess.id, PHASE_IDEATION, db_path=db_path)
+    increment_phase_attempt(sess.id, PHASE_CONCEPTION, db_path=db_path)
     create_phase_output(
         session_id=sess.id,
-        phase=PHASE_IDEATION,
+        phase=PHASE_CONCEPTION,
         agent="ideation",
         output="first",
         file_path=str(workspace / "i1.md"),
@@ -330,10 +329,10 @@ def test_get_session_detail_aggregates_phases_with_retries(tmp_path: Path) -> No
         attempt=1,
         db_path=db_path,
     )
-    increment_phase_attempt(sess.id, PHASE_IDEATION, db_path=db_path)
+    increment_phase_attempt(sess.id, PHASE_CONCEPTION, db_path=db_path)
     create_phase_output(
         session_id=sess.id,
-        phase=PHASE_IDEATION,
+        phase=PHASE_CONCEPTION,
         agent="ideation",
         output="second",
         file_path=str(workspace / "i2.md"),
@@ -367,7 +366,7 @@ def test_get_session_detail_aggregates_phases_with_retries(tmp_path: Path) -> No
     assert etat.skip_reason == "light mode"
 
     # ideation → done with TWO distinct attempts (retry not flattened)
-    ideation = by_id[PHASE_IDEATION]
+    ideation = by_id[PHASE_CONCEPTION]
     assert ideation.state == PHASE_STATE_DONE
     assert ideation.attempts_count == 2
     assert [a.attempt for a in ideation.attempts] == [1, 2]
@@ -381,8 +380,7 @@ def test_get_session_detail_aggregates_phases_with_retries(tmp_path: Path) -> No
     assert benchmark.attempts_count == 1  # attempt recorded, no output stored
     assert benchmark.attempts[0].outputs == []
 
-    # conception / challenge / synthese → pending
-    assert by_id[PHASE_CONCEPTION].state == PHASE_STATE_PENDING
+    # challenge / synthese → pending
     assert by_id[PHASE_CHALLENGE].state == PHASE_STATE_PENDING
     assert by_id[PHASE_SYNTHESE].state == PHASE_STATE_PENDING
 
